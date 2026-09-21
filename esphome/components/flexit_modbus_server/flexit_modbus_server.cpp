@@ -25,9 +25,13 @@ static size_t expected_frame_length(const uint8_t *frame, size_t available) {
     case 0x10: {  // write multiple registers
       if (available < 7)
         return available + 1;                            // need the byte count (frame[6]) first
+      // Modbus requires byte_count == 2 * quantity, with quantity in 1..123. Reject anything
+      // else at once, so a phantom 0x10 header can't stall the splitter waiting for bytes.
+      size_t quantity = (frame[4] << 8) | frame[5];
       size_t byte_count = frame[6];
-      size_t length = byte_count + 9;                    // 7 header + byte_count data + 2 CRC
-      return length <= MAX_FRAME_LENGTH ? length : 0;    // implausible count -> not a frame
+      if (quantity == 0 || quantity > 123 || byte_count != quantity * 2)
+        return 0;
+      return byte_count + 9;                             // 7 header + byte_count data + 2 CRC
     }
     default:
       return (function & 0x80) ? 5 : 0;                  // exception response, else unknown
