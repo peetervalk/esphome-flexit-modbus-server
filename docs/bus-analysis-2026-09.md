@@ -1,17 +1,22 @@
 # CS60 bus analysis, September 2026
 
 Findings from passively sniffing the RS485 bus between a Flexit CS60 and this
-component acting as the panel, plus the fixes they suggest.
+component acting as the panel, the fixes they suggest, and what has since
+been done about them.
 
 Hardware: ESP32 (GPIO18 TX / GPIO19 RX), ESPHome 2026.9.0, component at
 `main` = 82065d3 (PR #25 merged). Captures taken 2026-09-22 01:22–01:39 local
 time with `scripts/flexit_register_hunt.py`, which reads the `tcp_bridge`
 stream and never writes to the bus.
 
-Note that `ModbusRTUServer.cpp/.h` are not tracked in this repository; they come
-from `MSkjel/ESP-ModbusRTUServer` via `cg.add_library`, unless a local copy sits
-in the component directory, which then takes precedence. The fixes below say
-which repository they belong to.
+Note on where the code lives: `ModbusRTUServer.cpp/.h` come from
+`MSkjel/ESP-ModbusRTUServer` via `cg.add_library` in `__init__.py`, *unless* a
+local copy sits in the component directory — in which case the local copy wins
+and `cg.add_library` is skipped entirely. As of 2026-09-22 local copies are
+present there, verified byte-for-byte identical to upstream `main` before being
+patched, so library-side fixes now land in this repository too. They must be
+**committed** for a build that pulls this repo via `external_components` to see
+them; otherwise ESPHome silently falls back to fetching unpatched upstream.
 
 Everything below is measured from the wire unless explicitly marked as a
 hypothesis.
@@ -20,7 +25,8 @@ hypothesis.
 
 ## 1. The bus spends about half its bandwidth in a self-sustaining exception loop
 
-**Severity: high.** This is the headline finding.
+**Severity: high. Status: fixed 2026-09-22**, not yet confirmed on the wire.
+This is the headline finding.
 
 ### Measurement
 
@@ -80,13 +86,15 @@ R len=20  01 83 01 80 f0 | ...
 Of 1702 RX blocks containing the echoed exception, 1251 are followed by a fresh
 TX exception within two blocks.
 
-### Suggested fix
+### Fix applied, 2026-09-22
 
 A response can never be a request, so the high bit in the function code is
-enough to identify these. The fix belongs in this repository's frame splitter,
-in the `parse_frames`-style lambda in `FlexitModbusServer::setup()`, which is
-also where the related phantom-`0x10` guard from PR #25 lives. Keep consuming
-the 5 bytes so the splitter stays in sync, but never process them:
+enough to identify these. Three changes went in, across two files.
+
+**1. The splitter consumes exception responses without processing them** —
+`flexit_modbus_server.cpp`, in the `onRawBuffer` lambda in
+`FlexitModbusServer::setup()`, the same place as the phantom-`0x10` guard from
+PR #25. This is the cut that breaks the loop:
 
 ```c
 if (!mb_.checkCrc(data + offset, len)) {   // right size, bad CRC -> resync
@@ -94,37 +102,93 @@ if (!mb_.checkCrc(data + offset, len)) {   // right size, bad CRC -> resync
   continue;
 }
 
-// Our own transmissions are echoed back into RX on this bus. An exception
-// response is never a request, and feeding one to processFrame() makes
-// onInvalidFunction reply with `function | 0x80` - which for an already-set
-// high bit reproduces the frame byte for byte, looping forever. Consume it to
-// stay in sync, but do not process it.
-if ((data[offset + 1] & 0x80) != 0) {
-  offset += len;
-  continue;
-}
+// Bit 7 set in the function code means this is an exception *response* -- ours,
+// echoed back by the transceiver. Consume it so we stay in sync, but never
+// answer it: sendException() re-sets bit 7, so a reply to 0x84 is 0x84 byte for
+// byte, and a single echo becomes a permanent exception storm on the bus.
+if ((data[offset + 1] & 0x80) == 0)
+  mb_.processFrame(data + offset, len);
 
-mb_.processFrame(data + offset, len);
+offset += len;
 ```
 
-Note on where the code lives: `ModbusRTUServer.cpp/.h` are **not part of this
-repository**. `__init__.py` pulls them from
-`https://github.com/MSkjel/ESP-ModbusRTUServer.git` unless a local copy is
-present in the component directory, in which case the local copy wins. So a fix
-inside `processFrame` or `sendException` would have to go to that repository,
-whereas the splitter patch above lands here — and arguably belongs here anyway,
-since the own-TX echo is a trait of this bus rather than a generic Modbus server
-concern.
+**2. `onInvalidFunction` masks the function code** — same file. A reply can now
+never be byte-identical to the frame that prompted it, even if a response
+reaches it by some path the splitter does not screen. This supersedes the
+"have `sendException` refuse bit-7 frames" hardening suggested earlier, and is
+better placed: it keeps the policy next to the bus-specific code rather than in
+the generic library.
 
-Two optional hardenings, once the above is in place:
+```c
+mb_.sendException(function_code & 0x7F, 0x01, broadcast);
+```
 
-- Have `sendException` refuse to answer a frame whose function code already has
-  bit 7 set (in ESP-ModbusRTUServer), as a guard against any other path.
-- Suppress the own-TX echo at its source, by ignoring RX bytes that arrive while
-  or immediately after we transmit. That addresses the root cause rather than
-  this symptom, removes the noise that makes the bus hard to analyse, and would
-  also have prevented the phantom-`0x10` stall fixed in PR #25 from being
-  reachable at all.
+**3. `sendException` routes through `sendResponse`** — `ModbusRTUServer.cpp`.
+`sendResponse` appends the CRC, drives TX enable, flushes, and screens broadcast
+and a null stream; the hand-rolled body did only the CRC and the broadcast
+check, writing straight to the stream:
+
+```c
+void ModbusRTUServer::sendException(uint8_t function, uint8_t exceptionCode, bool broadcast) {
+    uint8_t response[5];
+    response[0] = serverId_;
+    response[1] = function | 0x80;
+    response[2] = exceptionCode;
+
+    sendResponse(response, 3, broadcast);
+}
+```
+
+This was not part of the original suggestion and is worth calling out, because
+it is a **behaviour change on the wire**: with a `tx_enable_pin` configured, the
+old `sendException` wrote without asserting DE, so exceptions never reached the
+bus at all. Fixing that is what makes them transmit for the first time on such
+boards — so change 3 must not land without change 1, or the loop becomes
+reachable on hardware where it previously was not. The captures above come from
+a board with no `tx_enable_pin`, where exceptions did transmit and the loop was
+live.
+
+### Verifying the fix
+
+Not yet done. Take a fresh 60-second capture and count the loop frame as a
+literal byte sequence in the TX stream, the same way the 2748 figure above was
+obtained:
+
+```bash
+python -u scripts/flexit_register_hunt.py --host <esp-ip> --duration 60 --save after.bin
+```
+
+Expect **zero** occurrences of `01 83 01 80 f0`, and the `01 83 02 c0 f1` count
+to fall to roughly the CS60's own rate for the out-of-range `FC03 0x0200` poll
+(~16 per 60 s per the table in §2) rather than 462. Unframeable bytes should
+drop well below the 52 KB of 176 KB noted in §5.
+
+### Still open
+
+- **Echo suppression at the source** — the preferred root-cause fix, still not
+  done. The guard above only screens frames *identifiable* as responses. A read
+  response is not: an `FC01` reply with `byteCount == 3` is exactly 8 bytes with
+  a valid CRC, indistinguishable from an 8-byte `FC01` request, so it is still
+  re-dispatched as one. That path does not self-sustain as reliably as the
+  exception loop, but it is the same class of bug, and it is what made the
+  phantom-`0x10` stall fixed in PR #25 reachable in the first place. Dropping
+  the next N received bytes after transmitting N would close the class; it has
+  to be opt-in, since a transceiver that gates RE does not echo and we would
+  swallow real bytes.
+- **The `MODBUS_DISABLE_*` defines do nothing.** They sit at
+  `flexit_modbus_server.h:22-25`, *after* `#include "ModbusRTUServer.h"` on line
+  10, and `ModbusRTUServer.cpp` is a separate translation unit that never sees
+  them. Nothing is passed via `cg.add_define` either. So every function code is
+  compiled in: `FC04` dispatches to `handleReadInputRegisters` — which serves the
+  4 input registers requested in `begin()` and answers illegal-data-address
+  beyond them — rather than falling through to `onInvalidFunction`, and
+  `FC05`/`FC0F`/`FC11` are live, meaning anything on the bus can write the
+  command coils directly. Fixing this needs `cg.add_define` in `__init__.py`,
+  since header ordering cannot reach the library's translation unit. Kept
+  separate from the loop fix deliberately: it changes which function codes the
+  firmware answers at all.
+- **Neither file is compile-verified here.** The repository has no CI and no
+  toolchain is installed locally, so the first real check is an ESPHome build.
 
 ---
 
@@ -149,9 +213,26 @@ That is roughly seven polls per second per register.
 component answers `0` to a question the CS60 asks seven times a second. This was
 observed live: after a task-watchdog reboot, the HA number entities for
 minimum / normal / maximum fan speed all read `0` while the unit continued
-ventilating at 57%. The CS60 evidently does not act on the bare read — it
-applies a value when the matching coil is raised — but relying on that is a
-thin margin, and it means the panel is advertising a setpoint it does not mean.
+ventilating at 57% — the speed it had been commanded before the reboot, which it
+simply kept.
+
+The zero is not a chosen sentinel. `ModbusRTUServer::begin()` does
+`new uint16_t[0x160]` followed by `std::fill_n(..., 0)`, and there is no
+persistence layer anywhere: nothing reads flash, nothing survives a reset. A
+register becomes non-zero only if the CS60 pushes it (the FC16 block below, or
+the FC06 runtime counters) or if we write it. `0x03` is in neither pushed range,
+so nobody but us ever writes it — and at boot we do not know it.
+
+What the CS60 does with the answer is the one mechanism still not pinned down.
+Two readings fit the captures. Either the read response is the delivery channel
+and `0` is rejected as invalid, leaving the fan at its last commanded value; or a
+bare read is never acted on at all and only a raised coil applies a value, making
+whatever we answer inert until then. The two reconcile if the coil array is a
+pending-command map: the CS60 polls coils (451×/60 s), reads the registers they
+flag, applies, acknowledges with `0x65`, and the coil is cleared. One observation
+separates them — does a `0x65` acknowledgement ever appear for a register written
+with `write_holding_register` alone, value set and no coil? If never, the coil is
+the gate, and whatever we serve while ignorant is harmless.
 
 ### What the CS60 sends us
 
@@ -234,102 +315,142 @@ capture data rather than let the socket back up.
 
 ---
 
-## 4. Proposed setpoint state machine (panel-side, YAML)
+## 4. Cold-start seam for the fan setpoints (panel-side, YAML)
 
-This follows directly from §2: the panel owns the setpoints, so the ESP must be
-their persistent, authoritative store, with Home Assistant as a UI on top rather
-than the owner. HA being unreachable must not affect what we answer the CS60.
+This replaces an earlier draft that proposed a full panel-side state machine with
+the ESP as persistent authority for all three setpoints. Three things learned
+since made most of that machinery unnecessary. They are recorded first, because
+the design follows from them.
 
-Three requirements, in priority order:
+### What changed
 
-1. **Serve the right value before the CS60 asks.** It polls `0x03` and `0x08`
-   about seven times a second, so the mirror must be populated during boot, not
-   after the first HA interaction.
-2. **Survive a reset** without HA, an automation, or the user being involved.
-3. **Command the unit once** on boot so the CS60's copy and ours provably agree,
-   rather than repeatedly (each `send_cmd` raises a coil the CS60 must consume).
+**The CS60 stores no setpoints at all.** It asks the panel for them, acknowledges
+a valid one with function `0x65`, and repeats the last one it received. There is
+nothing to read back from it and nothing for it to volunteer — which is why a
+capture 90 s after a reboot, with nothing commanded, showed no `0x65` for `0x03`
+and the register stayed 0. When the writer is lost, the unit has no valid
+setpoint, so nothing commands the fan and it holds its last commanded speed.
+
+**`REG_PERCENTAGE_SUPPLY_FAN` (`0xCA`) is not a measurement.** These are EC
+motors, and the register is the commanded 0-10 V signal the CS60 sends them; the
+motor follows it. So while mode is Normal, `0xCA` *is* the effective normal
+setpoint, readable straight off the bus. There is no ramp to wait out and no
+sensor lag to filter, because it is a command rather than a reading. (Whether
+airflow follows motor speed 1:1 is a property of the installation and out of
+scope here.)
+
+**The mode gate needs no extra guard.** Mode `0` is `"Stop"` and Normal is `2`,
+and `REG_MODE` (`0xBF`) and `0xCA` both arrive in the same FC16 status block. So
+before the first block lands the mode reads 0, the gate is shut, and a stale
+`0xCA` cannot be latched; when the block arrives, both become valid in the same
+frame. Gating on "mode is Normal" is sufficient by itself.
+
+### Flash is a non-issue
+
+The earlier draft worried about persisting a setpoint that an automation
+recomputes every five minutes. It does not cost what it appears to.
+
+`TemplateNumber::control()` persists, and it is the only thing that does:
+
+```cpp
+void TemplateNumber::control(float value) {
+  this->set_trigger_.trigger(value);
+  if (this->optimistic_) this->publish_state(value);
+  if (this->restore_value_) this->pref_.save(&value);
+}
+```
+
+`publish_state()` does not persist — the opposite of `switch_::Switch`, where
+`publish_state` is exactly what writes. So publishing a value learned from `0xCA`
+costs nothing; only a genuine set from HA or an automation reaches `control()`.
+
+Those writes are deferred and deduplicated too. `ESP32PreferenceBackend::save()`
+queues into `s_pending_save`, coalescing by key, and `sync()` calls
+`is_changed_()`, which `memcmp`s against what NVS already holds and skips the
+write when it matches. A setpoint recomputed every five minutes to the same
+number writes nothing at all. At `DEBUG` this is visible as
+`"Writing N items: X cached, Y written"`.
+
+Worst case — a genuinely different value every five minutes — is 288 writes/day.
+NVS appends 32-byte entries into 4096-byte pages and erases only when a page
+fills, wear-levelled across the partition, so that is single-digit page erases
+per day. Not a constraint.
+
+Two further details of `TemplateNumber::setup()` shape the design:
+
+- With `restore_value` set and nothing stored it falls back to `initial_value_`,
+  so `initial_value: 60` supplies a cold-start default with no flash involved.
+- It opens with `if (this->f_.has_value()) return;` — a number with a `lambda`
+  never restores and never uses `initial_value`. Lambda and stored value are
+  mutually exclusive, so an adopted value has to be pushed with an explicit
+  `publish_state` rather than read by a lambda.
 
 ### Design
 
-```yaml
-# Persistent store: the ESP is the authority for these, so they are plain
-# optimistic numbers with restore_value, NOT read-backs of our own mirror.
-# (The template platform rejects `lambda` together with restore_value /
-# optimistic / initial_value, and a read-back would only tell us what we
-# already stored.)
-number:
-  - platform: template
-    id: fan_normal
-    name: "Fan Speed Normal"
-    unit_of_measurement: "%"
-    mode: box
-    min_value: 1
-    max_value: 100
-    step: 1
-    optimistic: true
-    restore_value: true
-    set_action:
-      - lambda: |-
-          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL, (uint16_t)x);
-          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL, (uint16_t)x);
-  # ... same shape for fan_min (0x02 / 0x07) and fan_max (0x04 / 0x09)
+The automation that recomputes normal fan speed every five minutes is already the
+state machine. What is missing is only the cold-start seam: the window between
+boot and that automation's next run, during which we answer `0` and HA shows `0`.
 
-esphome:
-  on_boot:
-    # After every component is set up, so the server and the numbers exist.
-    - priority: -100
-      then:
-        - lambda: |-
-            // Populate the mirror WITHOUT raising coils: the CS60 polls these
-            // registers continuously and must never be told the setpoint is 0.
-            // write_holding_register() sets the value only; send_cmd() would
-            // also raise the coil, which is a command.
-            struct { flexit_modbus_server::HoldingRegisterIndex supply, extract;
-                     esphome::number::Number *num; } map[] = {
-              {flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MIN,
-               flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MIN,    id(fan_min)},
-              {flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL,
-               flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL, id(fan_normal)},
-              {flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX,
-               flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX,    id(fan_max)},
-            };
-            for (auto &m : map) {
-              float v = m.num->state;
-              if (std::isnan(v) || v < 1.0f) continue;   // nothing stored yet
-              id(server)->write_holding_register(m.supply,  (uint16_t)v);
-              id(server)->write_holding_register(m.extract, (uint16_t)v);
-            }
-        # Let the CS60 settle before commanding anything.
-        - delay: 15s
-        - lambda: |-
-            // One command per setpoint, so the unit's copy provably matches
-            // ours. The CS60 acknowledges via function 0x65 and clears the coil.
-            ...same table, but id(server)->send_cmd(...) instead
-```
+Scope it honestly. The unit is unaffected either way — it holds its last
+commanded speed. What the seam buys is that HA stops displaying a setpoint of
+zero and we stop advertising one we do not mean. That is a correctness-of-display
+problem with a bounded five-minute exposure, not a ventilation problem.
 
-Actual fan output stays a **sensor** (`REG_PERCENTAGE_SUPPLY_FAN`, `0x00CA`).
-Keeping setpoint and measurement as separate entity types is what makes the
-"reads 0 after a reboot" confusion impossible: numbers are what we intend,
-sensors are what the unit reports.
+**Minimum and maximum** are constants on this installation, 40 and 90. The CS60
+has no memory of them either, so until something commands them a Max-timer press
+after a reboot finds nothing valid to act on. They need no learning: seed them at
+boot and command them once.
+
+**Normal** is the only value that moves, and the only one with a read-back:
+
+1. At boot, serve the cold-start default (`initial_value: 60`), so we never
+   answer zero.
+2. Once the first status block shows mode Normal, `publish_state` the value of
+   `0xCA` into the number. HA then shows what the unit is actually commanding,
+   and nothing is written to flash.
+3. If mode is not Normal, keep the default. `0xCA` reports the Min or Max speed
+   in those modes and would latch the wrong number as Normal.
+4. Stop there. The automation commands the real value on its next run.
+
+Note what step 2 does *not* do: it does not command. After adopting, the unit is
+still running uncommanded — correct by coincidence rather than by instruction.
+Whether that matters is the first open question below.
+
+### Open questions
+
+- **Whether to command the adopted value at boot.** Commanding converts
+  "coincidentally correct and uncommanded" into "commanded and known", which
+  matters if anything can perturb the fan before the automation next runs. Not
+  commanding keeps the ESP from writing to the unit on every reboot. The
+  automation closes the gap within five minutes either way, which argues for
+  leaving it out of the first version.
+- **Whether the coil or the value gates application** — see the end of §2. If the
+  coil is the gate, whatever we serve while ignorant is inert and step 1 above is
+  purely cosmetic.
+- **`min_value` disagreement.** `Fan Speed Normal` allows `0` while Min and Max
+  start at `1`. Any guard that skips values below 1 would silently drop a
+  legitimately stored zero for Normal. The three should agree.
 
 ### Notes and caveats
 
-- **Untested.** This design follows from the captures but has not been flashed
-  or verified on hardware. The `on_boot` priority, and whether 15 s is the right
-  settling delay, both need checking against a real reboot.
-- **Divergence detection** is a possible extension: the CS60 repeats its `0x65`
-  acknowledgement continuously, so a mismatch between the acknowledged value and
-  the stored one could trigger a re-assert. Deliberately left out of the first
-  version — it needs a way to observe `0x65` traffic from YAML, which the
-  component does not currently expose.
+- **Untested.** This follows from the captures and from reading the ESPHome
+  sources, but nothing here has been flashed or verified on hardware. The boot
+  ordering in particular — that number entities restore before an `on_boot` block
+  at priority `-100` runs — is assumed, and worth confirming against a boot log.
+- Actual fan output stays a **sensor** on `0xCA`, separate from the setpoint
+  number. Keeping intent and command echo as different entity types is what makes
+  the "reads 0 after a reboot" confusion structurally impossible. There is no
+  register reporting extract fan output, so only supply has a counterpart.
 - **Compensation is the unit's own behaviour.** On this installation an external
   hardware switch (kitchen hood) makes the CS60 hold supply at normal and drop
   extract to minimum. We write supply and extract to the same value and let the
-  CS60 apply compensation itself; the state machine must not try to mirror or
-  fight it.
+  CS60 apply compensation itself; nothing here should try to mirror or fight it.
+- **Divergence detection**, floated in the earlier draft, is moot: with no
+  setpoint stored in the unit there is no second copy to diverge from.
 - **`getCoil` is not exposed** on `FlexitModbusServer`, though
   `ModbusRTUServer::getCoil` exists. Exposing it would allow a "command not yet
-  acknowledged" diagnostic, since the CS60 clearing a coil is its acknowledgement.
+  acknowledged" diagnostic, since the CS60 clearing a coil is its
+  acknowledgement — and would answer the coil-versus-value question from YAML.
 
 ---
 

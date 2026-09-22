@@ -123,10 +123,17 @@ void FlexitModbusServer::setup() {
         continue;
       }
 
-      // The startup input-register reads (0x04) aren't implemented, so they reply
-      // with an exception via onInvalidFunction. That's still a valid response, so
-      // the CS60 sees us as online without us having to serve input registers.
-      mb_.processFrame(data + offset, len);
+      // Bit 7 set in the function code means this is an exception *response* -- ours,
+      // echoed back by the transceiver. Consume it so we stay in sync, but never
+      // answer it: sendException() re-sets bit 7, so a reply to 0x84 is 0x84 byte for
+      // byte, and a single echo becomes a permanent exception storm on the bus.
+      //
+      // The startup input-register reads (0x04) ask for more registers than we serve,
+      // so they draw an illegal-data-address exception. That's still a valid response,
+      // so the CS60 sees us as online without us having to serve input registers.
+      if ((data[offset + 1] & 0x80) == 0)
+        mb_.processFrame(data + offset, len);
+
       offset += len;
     }
 
@@ -147,7 +154,9 @@ void FlexitModbusServer::setup() {
         return;
     }
 
-    mb_.sendException(data[1], 0x01, broadcast);
+    // Mask bit 7 so a reply can never be byte-identical to the frame that prompted
+    // it, even if a response reaches here by some path the splitter doesn't screen.
+    mb_.sendException(function_code & 0x7F, 0x01, broadcast);
   };
 
 #ifdef USE_FLEXIT_TCP_BRIDGE
