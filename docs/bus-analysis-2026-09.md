@@ -16,7 +16,11 @@ and `cg.add_library` is skipped entirely. As of 2026-09-22 local copies are
 present there, verified byte-for-byte identical to upstream `main` before being
 patched, so library-side fixes now land in this repository too. They must be
 **committed** for a build that pulls this repo via `external_components` to see
-them; otherwise ESPHome silently falls back to fetching unpatched upstream.
+them; otherwise ESPHome silently falls back to fetching unpatched upstream. The
+installation this doc is based on builds in Home Assistant from this
+repository's files, uploaded by hand, with `external_components` set to
+`type: local`, so it compiles the local copies whether or not they are
+committed.
 
 Everything below is measured from the wire unless explicitly marked as a
 hypothesis.
@@ -25,8 +29,9 @@ hypothesis.
 
 ## 1. The bus spends about half its bandwidth in a self-sustaining exception loop
 
-**Severity: high. Status: fixed 2026-09-22**, not yet confirmed on the wire.
-This is the headline finding.
+**Severity: high. Status: fixed 2026-09-22**, all three changes running on the
+ESP as of 2026-09-23; not yet confirmed on the wire. This is the headline
+finding.
 
 ### Measurement
 
@@ -187,8 +192,18 @@ drop well below the 52 KB of 176 KB noted in §5.
   since header ordering cannot reach the library's translation unit. Kept
   separate from the loop fix deliberately: it changes which function codes the
   firmware answers at all.
-- **Neither file is compile-verified here.** The repository has no CI and no
-  toolchain is installed locally, so the first real check is an ESPHome build.
+- **Compile status, 2026-09-23.** Both files have been through a real ESPHome
+  build: the Home Assistant build described at the top, which compiles the
+  patched local `ModbusRTUServer.cpp` (still untracked in git). The only warning
+  was in `dump_config`: `%u` for `baudRate()`, which returns `uint32_t`, and on
+  ESP32 that is `unsigned long`. It is fixed with `"%" PRIu32`, as in ESPHome's
+  own UART component, and the next build was warning-free. The warning was not
+  new. A build recompiles only files whose inputs changed and prints warnings
+  only for those, so it stays hidden while the cached object is reused. This
+  build recompiled every component because the §4 `on_boot` block adds two
+  components (the trigger and its `wait_until`), which changes
+  `ESPHOME_COMPONENT_COUNT` in the generated `defines.h` they all include. There
+  is still no CI.
 
 ---
 
@@ -258,6 +273,15 @@ the gate, and whatever we serve while ignorant is harmless.
   in a capture taken 90 s after a reboot, with nothing yet commanded, no `0x65`
   frame for `0x03` appeared at all, and the register stayed 0.
 
+  One detail here is unexplained (noticed 2026-09-23 on re-reading these tables).
+  `0x03` drew 439 confirmations in 60 s (308 + 131), close to its poll rate of
+  about 450 in the table above, while `0x08`, `0x114` and `0x13F` drew 3–8 each.
+  If the CS60 confirmed every read of a valid value, `0x08` would look like `0x03`;
+  if it confirmed only raised coils, `0x03` would look like the others. The two
+  tables may come from different windows, so recheck this in a capture taken
+  after the §1 fix before reading anything into it. It bears on the open question
+  above.
+
 ### Register map addenda
 
 Addresses inside the pushed `0x00BE`–`0x0112` block that carry non-zero data and
@@ -317,6 +341,9 @@ capture data rather than let the socket back up.
 
 ## 4. Cold-start seam for the fan setpoints (panel-side, YAML)
 
+**Status: implemented 2026-09-23** in `flexit-test.yaml` and flashed; not yet
+verified (see Notes and caveats).
+
 This replaces an earlier draft that proposed a full panel-side state machine with
 the ESP as persistent authority for all three setpoints. Three things learned
 since made most of that machinery unnecessary. They are recorded first, because
@@ -343,7 +370,9 @@ scope here.)
 and `REG_MODE` (`0xBF`) and `0xCA` both arrive in the same FC16 status block. So
 before the first block lands the mode reads 0, the gate is shut, and a stale
 `0xCA` cannot be latched; when the block arrives, both become valid in the same
-frame. Gating on "mode is Normal" is sufficient by itself.
+frame. Gating on "mode is Normal" is sufficient by itself to keep a wrong value
+out. *When* to evaluate the gate is a separate problem, covered under Boot timing
+below.
 
 ### Flash is a non-issue
 
@@ -376,14 +405,55 @@ NVS appends 32-byte entries into 4096-byte pages and erases only when a page
 fills, wear-levelled across the partition, so that is single-digit page erases
 per day. Not a constraint.
 
+The chosen design (below) keeps Normal out of flash anyway, by preference: no
+recurring writes, and one fixed fallback rather than a remembered one. Min and
+Max use `restore_value`; they change only when set by hand, so they write rarely.
+
 Two further details of `TemplateNumber::setup()` shape the design:
 
-- With `restore_value` set and nothing stored it falls back to `initial_value_`,
-  so `initial_value: 60` supplies a cold-start default with no flash involved.
+- Without `restore_value` it starts from `initial_value_` on every boot, which is
+  where Normal's fixed 60 comes from. With `restore_value` and nothing stored it
+  also falls back to `initial_value_`, which gives Min and Max their 40/90
+  defaults on a first boot.
 - It opens with `if (this->f_.has_value()) return;` — a number with a `lambda`
-  never restores and never uses `initial_value`. Lambda and stored value are
-  mutually exclusive, so an adopted value has to be pushed with an explicit
-  `publish_state` rather than read by a lambda.
+  never restores and never uses `initial_value`. Config validation goes further
+  and rejects `lambda` together with `restore_value`, `initial_value` or
+  `optimistic`. Lambda and stored value are mutually exclusive, so an adopted
+  value has to be pushed with an explicit `publish_state` rather than read by a
+  lambda.
+
+Two flash details that matter for Min and Max:
+
+- Saves reach flash every `flash_write_interval` (default 60 s) and on a clean
+  shutdown, not immediately. A watchdog reset loses a change made in the minute
+  before it, and the next boot then restores, and commands, the previous value.
+- The saved value is keyed on the entity's object ID, which comes from its name.
+  Renaming a number starts it from empty, i.e. from `initial_value`.
+
+### Boot timing
+
+Checked against the ESPHome 2026.9.0 source on 2026-09-23.
+
+- **Order.** Components set up in priority order: the Modbus server at `BUS`
+  (1000), template numbers at `HARDWARE` (800), and the `on_boot` block at its
+  own priority, here `-100`. The numbers have restored by the time `on_boot`
+  runs.
+- **Setup does not block** in this configuration. Nothing in it overrides
+  `can_proceed()` (in 2026.9.0 neither WiFi nor the API does), so setup is a
+  single pass and `on_boot` runs before `FlexitModbusServer::loop()` has handled
+  a single frame. Two consequences:
+  - whatever `on_boot` writes is the first answer the CS60 gets;
+  - `REG_MODE` and `0xCA` still read 0 at that point, so adopting `0xCA` cannot be
+    a one-shot check at boot. It has to wait for the first status block, which
+    arrives about every 0.4 s (160 per 60 s, §2).
+- **Mode 0 is ambiguous.** `REG_MODE` reads 0 both in Stop and before the first
+  block, so it cannot signal that mode information has arrived. `0xBE`
+  (temperature setpoint) can: it is the block's first register and is never 0 in
+  practice. The explicit alternative would be a "status block received" flag set
+  in the frame splitter, at the cost of a small C++ change.
+- **No second wait for the fan speed.** Mode and `0xCA` arrive in the same FC16
+  frame, applied in a single `processFrame` call, so when one is valid the other
+  is too.
 
 ### Design
 
@@ -396,25 +466,84 @@ commanded speed. What the seam buys is that HA stops displaying a setpoint of
 zero and we stop advertising one we do not mean. That is a correctness-of-display
 problem with a bounded five-minute exposure, not a ventilation problem.
 
-**Minimum and maximum** are constants on this installation, 40 and 90. The CS60
-has no memory of them either, so until something commands them a Max-timer press
-after a reboot finds nothing valid to act on. They need no learning: seed them at
-boot and command them once.
+**Minimum and maximum** are fully adjustable; this installation keeps them at 40
+and 90 by choice. The CS60 has no memory of them either, so until something
+commands them a Max-timer press after a reboot finds nothing valid to act on.
+They need no learning: the numbers use `restore_value` (40/90 when nothing is
+saved yet), and `on_boot` commands the restored values once. No settling delay is
+needed, because a raised coil stays raised until the CS60 confirms it with `0x65`.
 
-**Normal** is the only value that moves, and the only one with a read-back:
+**Normal** is the only value that moves, and the only one with a read-back. Its
+number has no `restore_value`, so it never writes to flash, and `initial_value:
+60` is the single fixed fallback. At boot:
 
-1. At boot, serve the cold-start default (`initial_value: 60`), so we never
-   answer zero.
-2. Once the first status block shows mode Normal, `publish_state` the value of
-   `0xCA` into the number. HA then shows what the unit is actually commanding,
-   and nothing is written to flash.
-3. If mode is not Normal, keep the default. `0xCA` reports the Min or Max speed
-   in those modes and would latch the wrong number as Normal.
-4. Stop there. The automation commands the real value on its next run.
+1. Serve nothing yet. Until the first status block the registers read 0, the one
+   value already seen to be harmless (§2).
+2. Wait for mode information, i.e. the status block itself, detected through
+   `0xBE` (see Boot timing), for up to 10 s.
+3. If mode is Normal and `0xCA` is non-zero, adopt `0xCA`: `publish_state` it into
+   the number and serve it in `0x03` and `0x08`. HA then shows what the unit is
+   actually running, and nothing is written to flash.
+4. Otherwise (another mode, or no block before the timeout) serve the fallback,
+   60. `0xCA` reports the Min or Max speed in those modes and would latch the
+   wrong number as Normal.
+5. Stop there. The automation commands the real value on its next run.
 
-Note what step 2 does *not* do: it does not command. After adopting, the unit is
+"Serve" means `write_holding_register` alone: value set, no coil raised. Adopting
+before serving anything is deliberate. Serving a default first would risk the
+CS60 applying it, if served values are applied at all (§2), and changing `0xCA`
+before we read it, so we would adopt our own guess.
+
+Note what step 3 does *not* do: it does not command. After adopting, the unit is
 still running uncommanded — correct by coincidence rather than by instruction.
 Whether that matters is the first open question below.
+
+As implemented in `flexit-test.yaml`:
+
+```yaml
+esphome:
+  on_boot:
+    # Runs after the Modbus server (priority 1000) and the numbers (800) are set up,
+    # and before the server has handled a single frame, so what gets written here is
+    # the first answer the CS60 gets.
+    - priority: -100
+      then:
+        # Min/Max: restored from flash (40/90 if nothing is saved yet). Send them to
+        # the unit once, so a Max-timer press after a reboot finds a valid value. The
+        # coil stays raised until the CS60 confirms with 0x65, so no delay is needed.
+        - lambda: |-
+            using namespace flexit_modbus_server;
+            auto *srv = id(server);
+            auto mn = (uint16_t) id(fan_min)->state;
+            auto mx = (uint16_t) id(fan_max)->state;
+            srv->send_cmd(REG_CMD_PERCENTAGE_SUPPLY_FAN_MIN,  mn);
+            srv->send_cmd(REG_CMD_PERCENTAGE_EXTRACT_FAN_MIN, mn);
+            srv->send_cmd(REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX,  mx);
+            srv->send_cmd(REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX, mx);
+
+        # Normal: wait for mode information, i.e. the status block itself. REG_MODE
+        # is 0 in Stop and also before the first block, so watch 0xBE (temperature
+        # setpoint), the block's first register. On timeout, mode still reads 0 and
+        # the lambda below serves the fallback.
+        - wait_until:
+            condition:
+              lambda: 'return id(server)->read_holding_register(flexit_modbus_server::REG_TEMPERATURE_SETPOINT) != 0;'
+            timeout: 10s
+
+        # Mode and supply fan speed arrive in the same frame, so no second wait.
+        - lambda: |-
+            using namespace flexit_modbus_server;
+            auto *srv = id(server);
+            auto v = (uint16_t) id(fan_normal)->state;        // 60, from initial_value
+            uint16_t fan = srv->read_holding_register(REG_PERCENTAGE_SUPPLY_FAN);
+            if (srv->read_holding_register(REG_MODE) == 2 && fan > 0) {
+              v = fan;                                        // Normal: take what the unit runs
+              id(fan_normal)->publish_state(v);               // HA only, no flash
+            }
+            // Serve it for supply and extract, without raising the coil.
+            srv->write_holding_register(REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL,  v);
+            srv->write_holding_register(REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL, v);
+```
 
 ### Open questions
 
@@ -423,20 +552,29 @@ Whether that matters is the first open question below.
   matters if anything can perturb the fan before the automation next runs. Not
   commanding keeps the ESP from writing to the unit on every reboot. The
   automation closes the gap within five minutes either way, which argues for
-  leaving it out of the first version.
-- **Whether the coil or the value gates application** — see the end of §2. If the
-  coil is the gate, whatever we serve while ignorant is inert and step 1 above is
-  purely cosmetic.
-- **`min_value` disagreement.** `Fan Speed Normal` allows `0` while Min and Max
-  start at `1`. Any guard that skips values below 1 would silently drop a
-  legitimately stored zero for Normal. The three should agree.
+  leaving it out of the first version, and the implementation does.
+- **Whether the coil or the value gates application** — see §2. With the design
+  above it matters only for the fallback branch. Adopting serves the speed the
+  unit already runs, so either answer leaves the fan alone. Serving 60 does not:
+  if served values are applied, 60 becomes the unit's real Normal speed the next
+  time it enters Normal, until the automation runs again (or until HA is back, if
+  it is down). If only the coil counts, 60 is what HA shows and nothing more. The
+  `0x65` counts in §2 hold an unexplained hint. To settle it, with the automation
+  paused and the unit in Normal, set `0x03` and `0x08` with
+  `write_holding_register` alone and watch for a `0x65` confirmation or a change
+  in `0xCA`.
+- **`min_value` disagreement — resolved 2026-09-23.** All three numbers now start
+  at 1, so the `fan > 0` guard in the boot code cannot drop a legitimate value.
 
 ### Notes and caveats
 
-- **Untested.** This follows from the captures and from reading the ESPHome
-  sources, but nothing here has been flashed or verified on hardware. The boot
-  ordering in particular — that number entities restore before an `on_boot` block
-  at priority `-100` runs — is assumed, and worth confirming against a boot log.
+- **Verification so far.** The boot ordering is confirmed from the ESPHome source
+  (Boot timing above), and the firmware was flashed on 2026-09-23 and seems to
+  work at first look. Still to check: after a reboot in Normal mode, `Fan Speed
+  Normal` in HA shows the unit's running speed rather than 60; after a reboot in
+  any other mode, 60. A capture, which can only start once WiFi and the bridge
+  are up, should show `0x03` and `0x08` answered with that value, never 0. The
+  DEBUG log does not show these values: number publishes log at VERBOSE.
 - Actual fan output stays a **sensor** on `0xCA`, separate from the setpoint
   number. Keeping intent and command echo as different entity types is what makes
   the "reads 0 after a reboot" confusion structurally impossible. There is no
