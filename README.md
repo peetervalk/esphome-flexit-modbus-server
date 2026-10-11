@@ -36,1374 +36,391 @@ This project implements a Modbus server for Flexit ventilation systems using ESP
 
 - **Supply Air Temperature:** Can only be set if no CI600 is connected (CS60 limitation).
 - **Startup Order:** ESP must be powered on before CS60, or CS60 won’t poll it.
-- **Optimistic Settings:** Some settings are “optimistic” and may not reflect changes from other panels or servers.
+- **Settings read-back:** Settings are read from what the CS60 broadcasts: all of them when the CS60 starts, and every change made from any panel. The ESP saves them to flash and loads them on boot, so if a setting was changed on the CI600 while the ESP was off it shows the old value until it changes again or the CS60 restarts. On a fresh install they show up once the CS60 has restarted with the ESP running.
+- **Runtime counters:** The CS60 only sends a counter word when it changes, so the ESP saves them to flash and loads them on boot. On a fresh install they show as unknown until the CS60 has sent both words (at the latest when it restarts).
 - **Address:** Address 1 is required for Heater On/Off to function, but this wont work if you have a CI600 connected.
 
 ---
 
 ## Quick Start
 
-1. **Connect Hardware:**  
-   Wire your ESP device to the RS485 transceiver and connect to the Flexit controller.
+1. **Connect hardware:** wire the ESP to the RS485 transceiver and connect it to the Flexit controller
+   (see [Recommended Hardware](#recommended-hardware)).
 
-2. **ESPHome Configuration:**  
-   Add the following to your ESPHome YAML file (adjust pins and options as needed):
+2. **Create your ESPHome config.** This is [`example.yaml`](example.yaml), set up for a XIAO ESP32-C3 on
+   the XIAO RS485 board. Change the board and pins to match your hardware:
 
    ```yaml
-   wifi:
-     fast_connect: true           # Needed if powered from the CS60
+   # Example config. Board and pins are for a XIAO ESP32-C3 on the XIAO RS485 board (see hardware/),
+   # change them to whatever you're using. Any ESP32/ESP8266 with an RS485 transceiver should work.
+   esphome:
+     name: flexit
+     friendly_name: Flexit
+
+   esp32:
+     board: seeed_xiao_esp32c3
+     framework:
+       type: arduino
 
    logger:
-     baud_rate: 115200
-     hardware_uart: UART1
      level: WARN
+     # on ESP8266, keep the logger off the modbus uart:
+     # hardware_uart: UART1
 
-   external_components:
-     - source: github://MSkjel/esphome-flexit-modbus-server@main
-       refresh: 60s
-       components: 
-         - flexit_modbus_server
+   api:
+   ota:
+     - platform: esphome
 
-   uart:
-     id: modbus_uart
-     tx_pin: GPIO1                # Set according to your hardware
-     rx_pin: GPIO3                # Set according to your hardware
-     baud_rate: 115200
+   wifi:
+     ssid: !secret wifi_ssid
+     password: !secret wifi_password
+     fast_connect: true             # needed if powered from the CS60
 
-   flexit_modbus_server:
-     - id: server
-       uart_id: modbus_uart
-       address: 3 # Address 1 is required for heater on/off, but this wont work in conjuction with a CI600
-       # Depending on hardware/optional:
-       # tx_enable_pin: GPIO16    # Set according to your hardware.
-       # tx_enable_direct: true   # Set according to your hardware. Inverts the DE signal
+   substitutions:
+     # XIAO RS485 board pins, change these for your hardware
+     flexit_tx_pin: GPIO6
+     flexit_rx_pin: GPIO7
+     # DE/RE pin. Remove if your RS485 board doesn't have one
+     flexit_tx_enable_pin: GPIO4
+     # flexit_tx_enable_direct: "false"   # if your board wants DE active low
+     flexit_address: "3"
+     # branch/tag for packages and component, e.g. dev for testing
+     flexit_ref: main
+     # 0s if you want every build to pull the latest
+     flexit_refresh: 1d
+
+   packages:
+     flexit:
+       url: https://github.com/MSkjel/esphome-flexit-modbus-server
+       ref: ${flexit_ref}
+       refresh: ${flexit_refresh}
+       files:
+         - packages/core.yaml         # required
+         - packages/controls.yaml
+         - packages/sensors.yaml
+         - packages/diagnostics.yaml
+         - packages/fan_speeds.yaml   # EC fans only
+         # - packages/fireplace.yaml  # needs controls + fan_speeds
+         # - packages/humidity_boost.yaml  # needs controls + your own humidity sensor
+         # - packages/co2.yaml             # needs controls + your own CO2 sensor
+         # - packages/summer_cooling.yaml  # needs controls
+         # - packages/computed.yaml
+         # - packages/advanced.yaml
    ```
 
-3. **Add Controls and Sensors:**
-   You can add switches, buttons, numbers, sensors, etc., using the provided examples.
-   See the full configuration example below for details. You can pick and choose from these sensors/switches.
+3. **Pick the packages you want** from the table below, then flash.
 
 ---
 
-## Configurations
+## Packages
 
-<details>
-<summary>Full sensor config with extras</summary>
-This config contains the Flexit sensors and switches and some esphome implemented features.
-New features might be added here in the future
+Each package is a YAML file in [`packages/`](packages). Add the ones you want to the `files:` list.
 
-As of now these are:
-- Fireplace mode
+| Package | Contents | Notes |
+|---|---|---|
+| [`core.yaml`](packages/core.yaml) | UART + `flexit_modbus_server` (`id: server`) | Required. Pins and address via substitutions |
+| [`controls.yaml`](packages/controls.yaml) | Mode, setpoint, heater, supply air control, max timer, filter interval, supply temp min/max, alarm/filter reset | |
+| [`sensors.yaml`](packages/sensors.yaml) | Temperatures, heating/cooling/heat exchanger %, runtime counters, alarms | |
+| [`diagnostics.yaml`](packages/diagnostics.yaml) | Fan type (EC/AC), heating type, controller SW version, week program active, home/away input, filter resets | Read only |
+| [`fan_speeds.yaml`](packages/fan_speeds.yaml) | Supply/extract fan % for MIN/NORMAL/MAX | EC fans only. Disabled by default |
+| [`fireplace.yaml`](packages/fireplace.yaml) | Fireplace mode (temporary MAX with custom fan speeds) | Needs `controls.yaml` and `fan_speeds.yaml` |
+| [`humidity_boost.yaml`](packages/humidity_boost.yaml) | Humidity boost (temporary MAX when humidity spikes, e.g. a shower) | Needs `controls.yaml` and a humidity sensor of your own |
+| [`co2.yaml`](packages/co2.yaml) | CO2 control around a target: stepped (MAX), proportional or PI (fan speeds) | Needs `controls.yaml` and a CO2 sensor of your own. The fan speed modes are EC fans only |
+| [`summer_cooling.yaml`](packages/summer_cooling.yaml) | Summer cooling (MAX when it is warm inside and cooler outside) | Needs `controls.yaml` |
+| [`computed.yaml`](packages/computed.yaml) | Heat recovery efficiency, heater power/energy, filter days remaining, combined alarm | Read only |
+| [`advanced.yaml`](packages/advanced.yaml) | Installer settings from the CI600 menus (see below) | All disabled by default |
+
+All settings are read back from the CS60, so changes made on a CI600 panel show up in Home Assistant as well
+(see [Limitations](#limitations)).
+
+### Customizing
+
+Every entity has an `id`, so you can change or drop entities without copying the package:
 
 ```yaml
+number:
+  - id: !extend temperature
+    step: 0.1                                  # override an option
+
+sensor:
+  - id: !remove return_water_temperature       # no water heating coil
+```
+
+Packages are applied first and your own config last, so anything you put in your YAML wins over the same
+thing in a package. The `substitutions:` in `core.yaml` are only defaults for the ones you don't set
+yourself. `esphome config yourfile.yaml` prints the merged result if you want to check what a build uses.
+
+Hardware settings are substitutions in `core.yaml`: `flexit_tx_pin`, `flexit_rx_pin`, `flexit_address`,
+and two optional ones that depend on your RS485 hardware:
+`flexit_tx_enable_pin` (the DE/RE pin, only if your transceiver has one wired to the ESP; default `none`) and
+`flexit_tx_enable_direct` (default `true`; set `false` to invert the DE signal if your transceiver needs it). Other server options can be added with `!extend server`, see
+[TCP Bridge](#optional-extras).
+
+`flexit_ref` selects the branch or tag for both the packages and the component, e.g. `dev` to test a
+branch or a release tag to pin a version. While testing a branch you keep pushing to, set
+`flexit_refresh: 0s` so every build fetches the latest commit.
+
+### In Home Assistant
+
+A few things that are the same for all packages:
+
+- **Where things show up.** The device page has three lists. *Controls* and *Sensors* hold what you use day
+  to day. *Configuration* holds settings you set once, like thresholds and timers. *Diagnostic* holds values
+  that are mostly useful when tuning or troubleshooting.
+- **Hidden settings.** Rarely needed entities are disabled by default, marked *hidden* in the tables below.
+  They still work with their default value. To change one, open the device page, click the line with the
+  number of entities not shown, open the entity, click the cog and turn on *Enabled*.
+- **Nothing appears by itself.** The entities are fixed when the firmware is built. Picking a mode in a select
+  can't show or hide the settings that go with it, so settings for a mode you don't use are still listed.
+- **Settings are saved on the ESP.** A value you change in Home Assistant survives reboots and updates, and
+  wins over a starting value in the config.
+- **Seeing why something happened.** The packages log when they start and stop and why. That is at `INFO`
+  level, so set `logger: level: INFO` while you are tuning.
+
+### Boosts
+
+Fireplace mode, humidity boost, CO2 control and summer cooling all raise the mode for a while. They don't
+set the mode themselves. Each one puts in a request, the highest request wins, and the unit goes back to the
+mode it was in when the last request is gone. So they can overlap without fighting, and you can use any
+combination of them. `Mode Boosted By` shows who is asking right now.
+
+Changing the mode yourself (Home Assistant, a CI600, the week program) always wins. It cancels the boosts
+that are running, and each of them waits until its reason is gone before it starts again. A stopped unit is
+never started by a boost. If the ESP reboots during a boost, it goes back to the old mode when it is up again.
+
+To add your own, put a request in from a lambda and take it out when you're done:
+
+```yaml
+- lambda: |-
+    id(mode_requests)["cooker hood"] = 3;      // 1 = min, 2 = normal, 3 = max
+    id(mode_arbiter).execute();
+- delay: 20min
+- lambda: |-
+    id(mode_requests).erase("cooker hood");
+    id(mode_arbiter).execute();
+```
+
+### Fireplace mode
+
+Temporarily switches to MAX with separate supply/extract fan speeds (for example high supply, low extract to
+help a fireplace draw), then restores the fan speeds after the configured duration.
+
+It uses the mode select and the MAX fan speeds from two other packages, so all three go in the `files:` list.
+The defaults are 60 minutes at 90 % supply and 20 % extract. Change them in Home Assistant, or set another
+starting value in the config. A value changed in Home Assistant is saved and wins over the config.
+
+```yaml
+packages:
+  flexit:
+    # url, ref and refresh as in the example above
+    files:
+      - packages/core.yaml
+      - packages/controls.yaml
+      - packages/fan_speeds.yaml
+      - packages/fireplace.yaml
+
 globals:
-  - id: fireplace_mode_active
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-
-  - id: previous_mode_before_fireplace
-    type: int
-    restore_value: yes
-    initial_value: '2'  # Default to Normal mode if we somehow fail
-
-  - id: fireplace_duration_minutes
-    type: int
-    restore_value: yes
-    initial_value: '60'
-
-  - id: original_supply_fan_max
-    type: float
-    restore_value: no
-    initial_value: '100.0'
-
-  - id: original_extract_fan_max
-    type: float
-    restore_value: no
-    initial_value: '100.0'
-
-  - id: fireplace_supply_fan_speed
-    type: int
-    restore_value: yes
-    initial_value: '90'
-
-  - id: fireplace_extract_fan_speed
-    type: int
-    restore_value: yes
-    initial_value: '20'
-
-    # Track when mode was last changed to debounce conflict detection
-  - id: fireplace_mode_change_timestamp
-    type: unsigned long
-    restore_value: no
-    initial_value: '0'
-
-switch:
-  - platform: template
-    id: heater
-    name: "Heater"
-    lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_STATUS_HEATER);"
-    turn_on_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_HEATER,
-            1
-          );
-    turn_off_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_HEATER,
-            0
-          );
-
-  - platform: template
-    id: supply_air_control
-    name: "Supply Air Control"
-    optimistic: True
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_AIR_CONTROL,
-            1
-          );
-    turn_off_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_AIR_CONTROL,
-            0
-          );
-
-  - platform: template
-    name: "Fireplace Mode"
-    id: fireplace_mode_switch
-    optimistic: false
-    lambda: |-
-      return id(fireplace_mode_active);
-
-    turn_on_action:
-      - lambda: |-
-          // Edge case: Don't activate if system is in Stop mode
-          int current_mode = id(server)->read_holding_register(flexit_modbus_server::REG_MODE);
-          if (current_mode == 0) {
-            ESP_LOGW("fireplace", "Cannot activate Fireplace mode while system is stopped");
-            return;
-          }
-
-          // Save current mode and fan speeds before switching
-          id(previous_mode_before_fireplace) = current_mode;
-
-          // Save current Max mode fan speeds (read from the number components)
-          id(original_supply_fan_max) = id(supply_air_percentage_max).state;
-          id(original_extract_fan_max) = id(extract_air_percentage_max).state;
-
-          ESP_LOGI("fireplace", "Saving current mode: %s (Supply: %.0f%%, Extract: %.0f%%)",
-                   flexit_modbus_server::mode_to_string(current_mode).c_str(),
-                   id(original_supply_fan_max),
-                   id(original_extract_fan_max));
-
-          ESP_LOGI("fireplace", "Activating Fireplace mode");
-          id(fireplace_mode_active) = true;
-
-          // Record timestamp BEFORE making changes to prevent false conflict detection
-          id(fireplace_mode_change_timestamp) = millis();
-
-      # Set fireplace fan speeds using the existing number components
-      - number.set:
-          id: supply_air_percentage_max
-          value: !lambda "return id(fireplace_supply_fan_speed);"
-      - number.set:
-          id: extract_air_percentage_max
-          value: !lambda "return id(fireplace_extract_fan_speed);"
-
-      - delay: 200ms  # Wait for fan speeds to apply
-
-      # Switch to Max mode using the existing select component
-      - select.set:
-          id: set_mode
-          option: "Max"
-
-      # Start the auto-shutoff timer
-      - script.execute: fireplace_timer
-
-      # Update the switch state
-      - lambda: |-
-          id(fireplace_mode_switch).publish_state(true);
-
-    turn_off_action:
-      - script.stop: fireplace_timer
-      - lambda: |-
-          if (!id(fireplace_mode_active)) {
-            ESP_LOGW("fireplace", "Fireplace mode already inactive");
-            return;
-          }
-
-          ESP_LOGI("fireplace", "Deactivating Fireplace mode");
-          id(fireplace_mode_active) = false;
-
-      # Restore original fan speeds using the existing number components
-      - number.set:
-          id: supply_air_percentage_max
-          value: !lambda "return id(original_supply_fan_max);"
-      - number.set:
-          id: extract_air_percentage_max
-          value: !lambda "return id(original_extract_fan_max);"
-
-      - delay: 200ms  # Wait for fan speeds to apply
-
-      # Restore previous mode using the existing select component
-      - lambda: |-
-          int restore_mode = id(previous_mode_before_fireplace);
-          std::string mode_str = flexit_modbus_server::mode_to_string(restore_mode);
-          ESP_LOGI("fireplace", "Restoring previous mode: %s", mode_str.c_str());
-
-          // Record timestamp for debouncing conflict detection
-          id(fireplace_mode_change_timestamp) = millis();
-
-          auto call = id(set_mode).make_call();
-          call.set_option(mode_str);
-          call.perform();
-
-      # Update the switch state
-      - lambda: |-
-          id(fireplace_mode_switch).publish_state(false);
-
-button:
-  - platform: template
-    id: clear_alarms
-    name: "Clear Alarms"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_CLEAR_ALARMS,
-            1
-          );
-
-  - platform: template
-    id: reset_filter_interval
-    name: "Reset Filter Interval"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_CLEAR_FILTER_ALARM,
-            1
-          );
-
-  - platform: template
-    id: start_max_timer
-    name: "Start Max Timer"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_START_MAX_TIMER,
-            1
-          );
-
-  - platform: template
-    id: stop_max_timer
-    name: "Stop Max Timer"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_STOP_MAX_TIMER,
-            1
-          );
-  
-number:
-  - platform: template
-    id: temperature
-    name: "Temperature"
-    max_value: 30
-    min_value: 10
-    step: 0.5
-    update_interval: 1s
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_SETPOINT
-      );
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SETPOINT,
-            x * 10
-        );
-
-  - platform: template
-    id: max_timer_minutes
-    name: "Max Timer Minutes"
-    max_value: 600
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_MINUTES_MAX_TIMER,
-            x
-        );
-
-  - platform: template
-    id: temperature_supply_min
-    name: "Temperature Supply Min"
-    max_value: 30
-    min_value: 10
-    step: 0.5
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_MIN,
-            x * 10
-        );
-
-  - platform: template
-    id: temperature_supply_max
-    name: "Temperature Supply Max"
-    max_value: 30
-    min_value: 10
-    step: 0.5
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_MAX,
-            x * 10
-        );
-
-  - platform: template
-    id: filter_change_interval
-    name: "Filter Change Interval"
-    max_value: 360
-    min_value: 30
-    step: 30
-    optimistic: True
-    restore_value: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_DAYS_FILTER_CHANGE_INTERVAL,
-            x
-        );
-
-  - platform: template
-    id: supply_air_percentage_min
-    name: "Supply Air Percentage Min"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MIN,
-            x
-        );
-  
-  - platform: template
-    id: supply_air_percentage_normal
-    name: "Supply Air Percentage Normal"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL,
-            x
-        );
-  
-  - platform: template
-    id: supply_air_percentage_max
-    name: "Supply Air Percentage Max"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX,
-            x
-        );
-  
-  - platform: template
-    id: extract_air_percentage_min
-    name: "Extract Air Percentage Min"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MIN,
-            x
-        );
-
-  - platform: template
-    id: extract_air_percentage_normal
-    name: "Extract Air Percentage Normal"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL,
-            x
-        );
-  
-  - platform: template
-    id: extract_air_percentage_max
-    name: "Extract Air Percentage Max"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX,
-            x
-        );
-
-  - platform: template
-    name: "Fireplace Mode Duration"
-    id: fireplace_duration
-    min_value: 1
-    max_value: 240
-    step: 1
-    unit_of_measurement: "min"
-    mode: box
-    optimistic: false
-    lambda: |-
-      return id(fireplace_duration_minutes);
-    set_action:
-      - lambda: |-
-          id(fireplace_duration_minutes) = (int)x;
-          ESP_LOGI("fireplace", "Duration set to %d minutes", (int)x);
-      - component.update: fireplace_duration
-
-  - platform: template
-    name: "Fireplace Supply Fan Speed"
-    id: fireplace_supply_speed_control
-    min_value: 1
-    max_value: 100
-    step: 1
-    unit_of_measurement: "%"
-    mode: box
-    optimistic: false
-    lambda: |-
-      return id(fireplace_supply_fan_speed);
-    set_action:
-      - lambda: |-
-          id(fireplace_supply_fan_speed) = (int)x;
-          ESP_LOGI("fireplace", "Fireplace supply fan speed set to %d%%", (int)x);
-      - component.update: fireplace_supply_speed_control
-
-  - platform: template
-    name: "Fireplace Extract Fan Speed"
-    id: fireplace_extract_speed_control
-    min_value: 1
-    max_value: 100
-    step: 1
-    unit_of_measurement: "%"
-    mode: box
-    optimistic: false
-    lambda: |-
-      return id(fireplace_extract_fan_speed);
-    set_action:
-      - lambda: |-
-          id(fireplace_extract_fan_speed) = (int)x;
-          ESP_LOGI("fireplace", "Fireplace extract fan speed set to %d%%", (int)x);
-      - component.update: fireplace_extract_speed_control
-
-select:
-  - platform: template
-    id: set_mode
-    name: "Set Mode"
-    update_interval: 1s
-    lambda: |-
-      return flexit_modbus_server::mode_to_string(
-        id(server)->read_holding_register(flexit_modbus_server::REG_MODE)
-      );
-    options:
-      - Stop
-      - Min
-      - Normal
-      - Max
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_MODE,
-            flexit_modbus_server::string_to_mode(x)
-        );
-
-sensor:
-  - platform: template
-    id: setpoint_air_temperature
-    name: "Setpoint Air Temperature"
-    update_interval: 1s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_SETPOINT
-      );
-
-  - platform: template
-    id: supply_air_temperature
-    name: "Supply Air Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_SUPPLY_AIR
-      );
-    filters:
-      - delta: 0.2
-
-  - platform: template
-    id: extract_air_temperature
-    name: "Extract Air Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_EXTRACT_AIR
-      );
-    filters:
-      - delta: 0.2
-
-  - platform: template
-    id: outdoor_air_temperature
-    name: "Outdoor Air Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_OUTDOOR_AIR
-      );
-    filters:
-      - delta: 0.2
-
-  - platform: template
-    id: return_water_temperature
-    name: "Return Water Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_RETURN_WATER
-      );
-
-  - platform: template
-    id: heating_percentage
-    name: "Heating Percentage"
-    update_interval: 20s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_HEATING
-      );
-  
-  - platform: template
-    id: cooling_percentage
-    name: "Cooling Percentage"
-    update_interval: 20s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_COOLING
-      );
-
-  - platform: template
-    id: heat_exchanger_percentage
-    name: "Heat Exchanger Percentage"
-    update_interval: 5s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_HEAT_EXCHANGER
-      );
-
-  - platform: template
-    id: supply_fan_speed_percentage
-    name: "Supply Fan Speed Percentage"
-    update_interval: 5s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_SUPPLY_FAN
-      );
-
-  - platform: template
-    id: runtime
-    name: "Runtime"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_HIGH
-      );
-
-  - platform: template
-    id: runtime_normal
-    name: "Runtime Normal"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_NORMAL_HIGH
-      );
-
-  - platform: template
-    id: runtime_stop
-    name: "Runtime Stop"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_STOP_HIGH
-      );
-
-  - platform: template
-    id: runtime_min
-    name: "Runtime Min"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_MIN_HIGH
-      );
-
-  - platform: template
-    id: runtime_max
-    name: "Runtime Max"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_MAX_HIGH
-      );
-
-  - platform: template
-    id: runtime_rotor
-    name: "Runtime Rotor"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_ROTOR_HIGH
-      );
-
-  - platform: template
-    id: runtime_heater
-    name: "Runtime Heater"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_HEATER_HIGH
-      );
-
-  - platform: template
-    id: runtime_filter
-    name: "Runtime Filter"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_FILTER_HIGH
-      );
-
-binary_sensor:
-  - platform: template
-    id: heater_enabled
-    name: "Heater Enabled"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_STATUS_HEATER
-      ) != 0);
-
-  - platform: template
-    id: alarm_supply_sensor_faulty
-    name: "Alarm Supply Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_SUPPLY_FAULTY
-      ) != 0);
-
-  - platform: template
-    id: alarm_extract_sensor_faulty
-    name: "Alarm Extract Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_EXTRACT_FAULTY
-      ) != 0);
-
-  - platform: template
-    id: alarm_outdoor_sensor_faulty
-    name: "Alarm Outdoor Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_OUTDOOR_FAULTY
-      ) != 0);
-
-  - platform: template
-    id: alarm_return_water_sensor_faulty
-    name: "Alarm Return Water Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_RETURN_WATER_FAULTY
-      ) != 0);
-
-  - platform: template
-    id: alarm_overheat_triggered
-    name: "Alarm Overheat Triggered"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_OVERHEAT_TRIGGERED
-      ) != 0);
-
-  - platform: template
-    id: alarm_external_smoke_sensor_triggered
-    name: "Alarm External Smoke Sensor Triggered"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_SMOKE_EXTERNAL_TRIGGERED
-      ) != 0);
-
-  - platform: template
-    id: alarm_water_coil_faulty
-    name: "Alarm Water Coil Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_WATER_COIL_FAULTY
-      ) != 0);
-
-  - platform: template
-    id: alarm_heat_exchanger_faulty
-    name: "Alarm Heat Exchanger Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_HEAT_EXCHANGER_FAULTY
-      ) != 0);
-
-  - platform: template
-    id: alarm_filter_change
-    name: "Alarm Filter Change"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_FILTER_CHANGE
-      ) != 0);
-
-  - platform: template
-    name: "Fireplace Mode Conflict Detected"
-    id: fireplace_conflict
-    internal: true
-    lambda: |-
-      if (!id(fireplace_mode_active)) {
-        return false;
-      }
-
-      // Debounce: Allow 5 seconds after mode change for Modbus to propagate
-      unsigned long time_since_change = millis() - id(fireplace_mode_change_timestamp);
-      if (time_since_change < 10000) {  // 10 second debounce
-        return false;  // Too soon after our mode change, ignore
-      }
-
-      // Check if mode was manually changed away from Max while fireplace mode is active
-      int current_mode = id(server)->read_holding_register(flexit_modbus_server::REG_MODE);
-      if (current_mode != 3) {  // Not in Max mode
-        ESP_LOGD("fireplace", "Conflict detected: current_mode=%d (expected 3), time_since_change=%lums",
-                 current_mode, time_since_change);
-        return true;  // Conflict detected
-      }
-      return false;
-    on_press:
-      - lambda: |-
-          ESP_LOGW("fireplace", "Mode changed manually during Fireplace mode - deactivating");
-      - switch.turn_off: fireplace_mode_switch
-
-text_sensor:
-  - platform: template
-    id: current_mode
-    name: "Current Mode"
-    update_interval: 1s
-    lambda: |-
-      return flexit_modbus_server::mode_to_string(
-        id(server)->read_holding_register(
-          flexit_modbus_server::REG_MODE
-        )
-      );
-
-script:
-  - id: fireplace_timer
-    mode: restart
-    then:
-      - lambda: |-
-          int duration = id(fireplace_duration_minutes);
-          ESP_LOGI("fireplace", "Starting %d minute timer", duration);
-      - delay: !lambda "return id(fireplace_duration_minutes) * 60 * 1000;"
-      - lambda: |-
-          ESP_LOGI("fireplace", "Fireplace timer expired, deactivating");
-      - switch.turn_off: fireplace_mode_switch
+  - id: !extend fireplace_duration_minutes
+    initial_value: '45'
 ```
-</details>
-<details>
-<summary>Sensors and switches only config</summary>
-This config contains only the Flexit sensors and switches
+
+| Entity | Default | What it does |
+|---|---|---|
+| `Fireplace Mode` | off | Turn on to start. Turns itself off after the duration |
+| `Fireplace Mode Duration` | 60 min | How long it runs |
+| `Fireplace Supply Fan Speed` | 90 % | Supply fan speed while it runs |
+| `Fireplace Extract Fan Speed` | 20 % | Extract fan speed while it runs |
+
+### Humidity boost
+
+Switches to MAX when humidity jumps above its normal level, until the room has recovered. "Normal" is the
+median of the last hour, so it follows the weather and seasons by itself, and the boost reacts to a sudden
+rise rather than to a fixed humidity level.
+
+The package needs a humidity sensor from your own config. Any platform works, including a `homeassistant`
+sensor. Point `flexit_humidity_sensor` at its `id`:
 
 ```yaml
-switch:
-  - platform: template
-    name: "Heater"
-    lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_STATUS_HEATER);"
-    turn_on_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_HEATER,
-            1
-          );
-    turn_off_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_HEATER,
-            0
-          );
+packages:
+  flexit:
+    # url, ref and refresh as in the example above
+    files:
+      - packages/core.yaml
+      - packages/controls.yaml
+      - packages/humidity_boost.yaml
 
-  - platform: template
-    name: "Supply Air Control"
-    optimistic: True
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_AIR_CONTROL,
-            1
-          );
-    turn_off_action:
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_AIR_CONTROL,
-            0
-          );
-
-button:
-  - platform: template
-    name: "Clear Alarms"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_CLEAR_ALARMS,
-            1
-          );
-
-  - platform: template
-    name: "Reset Filter Interval"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_CLEAR_FILTER_ALARM,
-            1
-          );
-
-  - platform: template
-    name: "Start Max Timer"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_START_MAX_TIMER,
-            1
-          );
-
-  - platform: template
-    name: "Stop Max Timer"
-    on_press: 
-      - lambda: |-
-          id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_STOP_MAX_TIMER,
-            1
-          );
-  
-number:
-  - platform: template
-    name: "Temperature"
-    max_value: 30
-    min_value: 10
-    step: 0.5
-    update_interval: 1s
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_SETPOINT
-      );
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SETPOINT,
-            x * 10
-        );
-
-  - platform: template
-    name: "Max Timer Minutes"
-    max_value: 600
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_MINUTES_MAX_TIMER,
-            x
-        );
-
-  - platform: template
-    name: "Temperature Supply Min"
-    max_value: 30
-    min_value: 10
-    step: 0.5
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_MIN,
-            x * 10
-        );
-
-  - platform: template
-    name: "Temperature Supply Max"
-    max_value: 30
-    min_value: 10
-    step: 0.5
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_TEMPERATURE_SUPPLY_MAX,
-            x * 10
-        );
-
-  - platform: template
-    name: "Filter Change Interval"
-    max_value: 360
-    min_value: 30
-    step: 30
-    optimistic: True
-    restore_value: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_DAYS_FILTER_CHANGE_INTERVAL,
-            x
-        );
-
-  - platform: template
-    name: "Supply Air Percentage Min"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MIN,
-            x
-        );
-  
-  - platform: template
-    name: "Supply Air Percentage Normal"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL,
-            x
-        );
-  
-  - platform: template
-    name: "Supply Air Percentage Max"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX,
-            x
-        );
-  
-  - platform: template
-    name: "Extract Air Percentage Min"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MIN,
-            x
-        );
-
-  - platform: template
-    name: "Extract Air Percentage Normal"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL,
-            x
-        );
-  
-  - platform: template
-    name: "Extract Air Percentage Max"
-    max_value: 100
-    min_value: 1
-    step: 1
-    optimistic: True
-    restore_value: True
-    disabled_by_default: True
-    mode: BOX
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX,
-            x
-        );
-
-select:
-  - platform: template
-    name: "Set Mode"
-    update_interval: 1s
-    lambda: |-
-      return flexit_modbus_server::mode_to_string(
-        id(server)->read_holding_register(flexit_modbus_server::REG_MODE)
-      );
-    options:
-      - Stop
-      - Min
-      - Normal
-      - Max
-    set_action:
-      lambda: |-
-        id(server)->send_cmd(
-            flexit_modbus_server::REG_CMD_MODE,
-            flexit_modbus_server::string_to_mode(x)
-        );
+substitutions:
+  flexit_humidity_sensor: inside_humidity
 
 sensor:
-  - platform: template
-    name: "Setpoint Air Temperature"
-    update_interval: 1s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_SETPOINT
-      );
-
-  - platform: template
-    name: "Supply Air Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_SUPPLY_AIR
-      );
-    filters:
-      - delta: 0.2
-
-  - platform: template
-    name: "Extract Air Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_EXTRACT_AIR
-      );
-    filters:
-      - delta: 0.2
-
-  - platform: template
-    name: "Outdoor Air Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_OUTDOOR_AIR
-      );
-    filters:
-      - delta: 0.2
-
-  - platform: template
-    name: "Return Water Temperature"
-    update_interval: 60s
-    device_class: temperature
-    unit_of_measurement: "°C"
-    lambda: |-
-      return id(server)->read_holding_register_temperature(
-        flexit_modbus_server::REG_TEMPERATURE_RETURN_WATER
-      );
-
-  - platform: template
-    name: "Heating Percentage"
-    update_interval: 20s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_HEATING
-      );
-  
-  - platform: template
-    name: "Cooling Percentage"
-    update_interval: 20s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_COOLING
-      );
-
-  - platform: template
-    name: "Heat Exchanger Percentage"
-    update_interval: 5s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_HEAT_EXCHANGER
-      );
-
-  - platform: template
-    name: "Supply Fan Speed Percentage"
-    update_interval: 5s
-    unit_of_measurement: "%"
-    lambda: |-
-      return id(server)->read_holding_register(
-        flexit_modbus_server::REG_PERCENTAGE_SUPPLY_FAN
-      );
-
-  - platform: template
-    name: "Runtime"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Normal"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_NORMAL_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Stop"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_STOP_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Min"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_MIN_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Max"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_MAX_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Rotor"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_ROTOR_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Heater"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_HEATER_HIGH
-      );
-
-  - platform: template
-    name: "Runtime Filter"
-    update_interval: 60s
-    unit_of_measurement: "h"
-    lambda: |-
-      return id(server)->read_holding_register_hours(
-        flexit_modbus_server::REG_RUNTIME_FILTER_HIGH
-      );
-
-binary_sensor:
-  - platform: template
-    name: "Heater Enabled"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_STATUS_HEATER
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Supply Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_SUPPLY_FAULTY
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Extract Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_EXTRACT_FAULTY
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Outdoor Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_OUTDOOR_FAULTY
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Return Water Sensor Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_RETURN_WATER_FAULTY
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Overheat Triggered"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_OVERHEAT_TRIGGERED
-      ) != 0);
-
-  - platform: template
-    name: "Alarm External Smoke Sensor Triggered"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_SMOKE_EXTERNAL_TRIGGERED
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Water Coil Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_WATER_COIL_FAULTY
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Heat Exchanger Faulty"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_SENSOR_HEAT_EXCHANGER_FAULTY
-      ) != 0);
-
-  - platform: template
-    name: "Alarm Filter Change"
-    lambda: |-
-      return (id(server)->read_holding_register(
-        flexit_modbus_server::REG_ALARM_FILTER_CHANGE
-      ) != 0);
-
-text_sensor:
-  - platform: template
-    name: "Current Mode"
-    update_interval: 1s
-    lambda: |-
-      return flexit_modbus_server::mode_to_string(
-        id(server)->read_holding_register(
-          flexit_modbus_server::REG_MODE
-        )
-      );
+  - platform: dht
+    pin: GPIO10
+    humidity:
+      id: inside_humidity
+      name: "Humidity Inside"
+      filters:                 # one bad DHT read shouldn't look like a shower
+        - filter_out: nan
+        - median:
+            window_size: 5
+            send_every: 1
+    update_interval: 10s
 ```
-</details>
+
+Graph `Humidity Above Baseline` for a few days to pick a trigger delta. After a boost that ran into the
+maximum runtime it waits for humidity to come back down before it boosts again.
+
+| Entity | Default | What it does |
+|---|---|---|
+| `Humidity Boost` | off | On while boosting. Can also be turned on by hand, it then ends like any other boost |
+| `Humidity Boost Enable` | on | Off means it never starts by itself |
+| `Humidity Boost Trigger Delta` | 8 % | Starts when humidity is this far above the baseline |
+| `Humidity Boost Release Delta` | 3 % | Ends when humidity is back within this of the baseline |
+| `Humidity Boost Release Minutes` | 5 min | How long it has to stay there before the boost ends. *Hidden* |
+| `Humidity Boost Min Minutes` | 5 min | Shortest boost |
+| `Humidity Boost Max Minutes` | 45 min | Longest boost, in case humidity never comes back down |
+| `Humidity Boost Cooldown Minutes` | 15 min | Pause after a boost before the next can start. *Hidden* |
+| `Humidity Baseline` | | The normal humidity it compares against |
+| `Humidity Above Baseline` | | Humidity now minus the baseline |
+
+### CO2 control
+
+Needs a CO2 sensor from your own config, with `flexit_co2_sensor` set to its `id` (default `co2`). There is
+one level to set, `CO2 Target`. Pick what happens above it with the `CO2 Control` select:
+
+- **Stepped** switches to MAX when CO2 is well over the target, and stays there until it is back under it.
+- **Proportional** raises the NORMAL mode fan speeds the further CO2 is over the target, up to
+  `CO2 Max Fan Increase`. Simple and steady, but CO2 settles somewhere above the target.
+- **PI** keeps raising the fan speeds until CO2 is back at the target. It holds the level better, but the two
+  PI settings may need tuning for your house if the fans start going up and down.
+
+"Well over" is `CO2 Band` above the target, 400 ppm by default. The fan modes are for EC fans only. Supply
+and extract get the same increase, so the balance between them stays. In MIN the NORMAL speeds aren't used,
+so the fan modes also switch from MIN to NORMAL when CO2 is a band over the target.
+
+| Entity | Default | What it does |
+|---|---|---|
+| `CO2 Control` | Off | Off, Stepped, Proportional or PI |
+| `CO2 Target` | 800 ppm | The level to keep CO2 at. Nothing happens under it |
+| `CO2 Band` | 400 ppm | How far over the target counts as high. Smaller reacts sooner and harder. *Hidden* |
+| `CO2 Max Fan Increase` | 30 % | Proportional and PI: the most that is added to the NORMAL fan speeds |
+| `CO2 PI Gain` | 5 % | PI: fan speed added for every 100 ppm over the target. Higher is faster. *Hidden* |
+| `CO2 PI Integral Time` | 30 min | PI: how quickly it keeps adding while CO2 stays over the target. Shorter is faster, too short and the fans go up and down. *Hidden* |
+| `CO2 Control Active` | | On while it is holding a higher mode or has raised the fan speeds |
+| `CO2 Fan Increase` | | What proportional or PI has added to the fan speeds right now. Graph it against CO2 when tuning |
+
+With the defaults, proportional adds 15 % at 1000 ppm and the full 30 % at 1200 ppm. PI starts out
+careful and can take hours to bring CO2 all the way down to the target. If that is too slow, raise the gain
+or shorten the integral time a step at a time.
+
+```yaml
+packages:
+  flexit:
+    # url, ref and refresh as in the example above
+    files:
+      - packages/core.yaml
+      - packages/controls.yaml
+      - packages/co2.yaml
+
+substitutions:
+  flexit_co2_sensor: co2
+
+i2c:                       # pins for your hardware
+  sda: GPIO5
+  scl: GPIO3
+
+sensor:
+  - platform: scd4x
+    co2:
+      id: co2
+      name: "CO2"
+    update_interval: 60s
+```
+
+If the sensor stops giving a value, both go back to normal. A `homeassistant` sensor keeps its last value
+when Home Assistant goes away, so give it a `timeout` filter:
+
+```yaml
+sensor:
+  - platform: homeassistant
+    id: co2
+    entity_id: sensor.living_room_co2
+    filters:
+      - timeout: 30min
+```
+
+### Summer cooling
+
+Switches to MAX when the house is too warm and the outdoor air is at least `Summer Cooling Min Difference`
+colder than the extract air, at any time of day. Too warm means the extract air is above `Summer Cooling Above`
+and also `Summer Cooling Above Setpoint` degrees over the unit's setpoint, so it doesn't cool a house the unit
+is trying to heat. It never runs while the heater is on. It stops when the house has cooled down or the
+outdoor air is no longer colder. The CS60 still regulates the supply air to its setpoint, so how much this
+cools depends on that setpoint. `Summer Cooling Min Outdoor` keeps it from running in winter.
+
+It only needs the package, the temperatures come from the unit. The numbers can be changed in Home
+Assistant, or given other starting values in the config:
+
+```yaml
+packages:
+  flexit:
+    # url, ref and refresh as in the example above
+    files:
+      - packages/core.yaml
+      - packages/controls.yaml
+      - packages/summer_cooling.yaml
+
+number:
+  - id: !extend summer_cooling_above
+    initial_value: 23
+  - id: !extend summer_cooling_min_difference
+    initial_value: 3
+```
+
+| Entity | Default | What it does |
+|---|---|---|
+| `Summer Cooling Enable` | on | Off means it never starts |
+| `Summer Cooling Above` | 24 °C | Extract air has to be warmer than this |
+| `Summer Cooling Above Setpoint` | 1 °C | and this much warmer than the unit's setpoint |
+| `Summer Cooling Min Difference` | 2 °C | Outdoor air has to be this much colder than the extract air |
+| `Summer Cooling Min Outdoor` | 12 °C | Never runs when it is colder than this outside. *Hidden* |
+| `Summer Cooling Active` | | On while it is cooling |
+
+### Computed sensors
+
+`computed.yaml` adds values worked out from what the CS60 already sends:
+
+- `Heat Recovery Efficiency`, from the supply, extract and outdoor temperatures. Only published while the
+  rotor runs without the heater or cooling, and with at least 5 °C between inside and outside.
+- `Heater Power` and `Heater Energy`, estimated from the heating percentage. Set `flexit_heater_power` to the
+  rated power of your electric heater in watts (default `900`).
+- `Filter Days Remaining`, and one `Alarm` sensor that is on when any alarm is.
+
+```yaml
+packages:
+  flexit:
+    # url, ref and refresh as in the example above
+    files:
+      - packages/core.yaml
+      - packages/computed.yaml
+
+substitutions:
+  flexit_heater_power: "1200"
+
+# with a water coil instead of an electric heater, drop the two heater sensors
+# sensor:
+#   - id: !remove heater_energy
+#   - id: !remove heater_power
+```
+
+### Advanced settings
+
+`advanced.yaml` mirrors the installer settings in the CI600's *Advanced user* (PIN 1000) and *Service*
+(PIN 8888) menus: sensor enables and calibration, filter guard, external temperature control, cooling and
+coolness recovery, neutral zones, fire/smoke mode, home/away, start/stop sequence, AC-fan speeds, rotor alarm
+type, de-icing, and clearing the alarm log. They are `disabled_by_default`; enable the ones you need in
+Home Assistant. Some only apply to one hardware variant: the fan type (DIP switch DS4, shown by
+`diagnostics.yaml`) decides whether the EC fan percentages or the AC-fan speed settings are used, and the
+return water settings only matter for units with a water heating coil.
 
 ---
 
@@ -1441,9 +458,7 @@ Data is sent to TCP clients using a simple 3-byte header + payload format:
 
 ```yaml
 flexit_modbus_server:
-  - id: server
-    uart_id: modbus_uart
-    address: 3
+  - id: !extend server
     tcp_bridge_enabled: true
     tcp_bridge_port: 8502
     tcp_bridge_max_clients: 2
