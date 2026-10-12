@@ -19,7 +19,7 @@ Status as of 2026-10-12.
 | [Flash persistence can be turned off](#flash-persistence-can-be-turned-off) | component | No |
 | [Echoed exception responses are not answered](#echoed-exception-responses-are-not-answered) | component | Not yet |
 | [`PRIu32` for the baud rate log](#priu32-for-the-baud-rate-log) | component | Not yet |
-| [ModbusRTUServer comes from a fork](#modbusrtuserver-comes-from-a-fork) | `__init__.py` | Library fix: not yet. The link itself stays fork-only. |
+| [ModbusRTUServer is built from its `dev` branch](#modbusrtuserver-is-built-from-its-dev-branch) | `__init__.py` | No. Upstream `main` has `modbus_library_ref` for this. |
 
 Nothing in `packages/`, `example.yaml` or the README is changed.
 
@@ -72,28 +72,40 @@ A frame with bit 7 set in the function code is a response, never a request, so
 the frame splitter now consumes it without dispatching it. `onInvalidFunction`
 also masks bit 7 before replying. Boards that do not echo are unaffected.
 
+The library's echo filter ([below](#modbusrtuserver-is-built-from-its-dev-branch))
+now drops a complete echo before the splitter sees it. This check stays for
+whatever gets past the filter.
+
 ## `PRIu32` for the baud rate log
 
 `dump_config` printed a `uint32_t` with `%u`, which draws a format warning on
 ESP32. It was the only compiler warning in the component.
 
-## ModbusRTUServer comes from a fork
+## ModbusRTUServer is built from its `dev` branch
 
-`__init__.py` fetches the library from
-[peetervalk/ESP-ModbusRTUServer](https://github.com/peetervalk/ESP-ModbusRTUServer)
-at commit `e7884ad` (branch `fix/exception-tx-enable`) instead of
-`MSkjel/ESP-ModbusRTUServer`.
+`__init__.py` fetches
+[MSkjel/ESP-ModbusRTUServer](https://github.com/MSkjel/ESP-ModbusRTUServer) at
+commit `75e0881`, the head of its `dev` branch on 2026-10-12, instead of `main`.
 
-The one difference: `sendException` goes through `sendResponse`, so TX enable is
-asserted and the stream is flushed, as for every other reply.
+`dev` is `main` plus one commit, which does two things:
 
-- **Boards with a `tx_enable_pin`:** upstream's library never puts an exception
-  on the bus, because the driver is not enabled for it. With this fork
+- **Echo filter.** Bytes that match the frame the library just sent are held
+  back, and dropped once the whole frame has come back. Anything else is passed
+  on untouched. It is on by default.
+- **`sendException` goes through `sendResponse`**, so TX enable is asserted and
+  the stream is flushed, as for every other reply. This was the one change in
+  the peetervalk library fork this branch used before, so that fork is no longer
+  needed.
+
+Things to know:
+
+- **Boards with a `tx_enable_pin`:** the library on `main` never puts an
+  exception on the bus, because the driver is not enabled for it. With `dev`
   exceptions are transmitted. This has not been tested on such a board; the
   installation behind this fork has no `tx_enable_pin`.
 - **Updating the library:** change the commit hash in `__init__.py`. ESPHome
-  clones a library once and reuses that clone, so pushing to the branch is not
-  enough.
+  clones a library once and reuses that clone, so a new commit on `dev` is not
+  picked up by itself.
 - **Local copies still win:** as upstream, a `ModbusRTUServer.h` or `.cpp` in the
   component folder is used instead of the fetched library.
 

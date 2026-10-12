@@ -65,9 +65,10 @@ async def to_code(config):
     if not local_lib_exists:
         cg.add_library(
             name="ModbusRTUServer",
-            # peetervalk fork, branch fix/exception-tx-enable. Pinned to a commit:
-            # ESPHome never refreshes a cloned library, so change the hash to update.
-            repository="https://github.com/peetervalk/ESP-ModbusRTUServer.git#e7884adfe2b85d6ff11578300abb16c844c5a780",
+            # MSkjel's dev branch (echo filter, sendException via sendResponse). Pinned
+            # to a commit: ESPHome never refreshes a cloned library, so change the hash
+            # to update.
+            repository="https://github.com/MSkjel/ESP-ModbusRTUServer.git#75e08812b4a1b4bd779b265cf9c3ff61a2e4dbff",
             version=None
         )
 
