@@ -60,7 +60,7 @@ FlexitModbusServer::FlexitModbusServer() {}
 void FlexitModbusServer::dump_config() {
   ESP_LOGCONFIG(TAG, "Flexit Modbus Server:");
   ESP_LOGCONFIG(TAG, "  Address: 0x%02X", server_address_);
-  ESP_LOGCONFIG(TAG, "  Baud Rate: %u", baudRate());
+  ESP_LOGCONFIG(TAG, "  Baud Rate: %" PRIu32, baudRate());
 
   if (tx_enable_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  TX Enable Pin: GPIO%d", tx_enable_pin_);
