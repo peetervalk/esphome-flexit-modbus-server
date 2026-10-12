@@ -101,6 +101,9 @@ flexit_modbus_server:
     uart_id: modbus_uart
     address: 1
     tcp_bridge_enabled: true   # listens on port 502
+    # ESP-ModbusRTUServer branch, tag or commit. dev has the RS485 echo filter.
+    # A branch is cloned once: use Clean Build Files to pick up new commits.
+    modbus_library_ref: dev
     # The component keeps nothing in flash (both default to true, as upstream).
     # Min/Max are restored by the numbers below; Normal is never saved.
     persist_settings: false

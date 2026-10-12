@@ -12,26 +12,59 @@ this page says otherwise.
 
 ## Summary
 
-Status as of 2026-10-12.
+Status as of 2026-10-12, with upstream `main` merged at `6e6d21f`.
 
 | Change | Files | Proposed upstream? |
 |---|---|---|
-| [Flash persistence can be turned off](#flash-persistence-can-be-turned-off) | component | No |
 | [Echoed exception responses are not answered](#echoed-exception-responses-are-not-answered) | component | Not yet |
 | [`PRIu32` for the baud rate log](#priu32-for-the-baud-rate-log) | component | Not yet |
-| [ModbusRTUServer is built from its `dev` branch](#modbusrtuserver-is-built-from-its-dev-branch) | `__init__.py` | No. Upstream `main` has `modbus_library_ref` for this. |
 
 Nothing in `packages/`, `example.yaml` or the README is changed.
+[`flexit-test.yaml`](flexit-test.yaml) is the configuration of the installation
+behind this fork.
 
-## Flash persistence can be turned off
+Two earlier differences are gone, because upstream has them now:
+
+- **Flash persistence can be turned off.** `persist_settings` and
+  `persist_runtime_counters` were merged in upstream PR #33. They are described
+  [below](#the-persistence-options), because the upstream README does not
+  mention them yet.
+- **The library link.** This branch used to fetch ESP-ModbusRTUServer from a
+  fixed commit set in `__init__.py`. Upstream's `modbus_library_ref` option
+  replaces that, see [Choosing the library branch](#choosing-the-library-branch).
+
+## Echoed exception responses are not answered
+
+Some RS485 transceivers echo the ESP's own transmissions back into RX. An
+exception response sent by the component then arrives as an incoming frame, is
+answered with another exception, and that answer is byte-identical to the frame
+that caused it. The loop never ends: 2748 such frames were counted in a
+60 second capture, about as many as the CS60's own requests.
+
+A frame with bit 7 set in the function code is a response, never a request, so
+the frame splitter now consumes it without dispatching it. `onInvalidFunction`
+also masks bit 7 before replying. Boards that do not echo are unaffected.
+
+The library's echo filter (see
+[Choosing the library branch](#choosing-the-library-branch)) drops a complete
+echo before the splitter sees it. This check stays for whatever gets past the
+filter, and for builds against a library branch without it.
+
+## `PRIu32` for the baud rate log
+
+`dump_config` printed a `uint32_t` with `%u`, which draws a format warning on
+ESP32. It was the only compiler warning in the component.
+
+## The persistence options
 
 Upstream saves the setting registers and the runtime counters to flash and
 restores them when the ESP boots (see "Settings read-back" and "Runtime
-counters" in the README). Settings are saved whenever one changes, the counters
-once an hour. A setpoint that an automation adjusts every few minutes is
-therefore written to flash every time it changes.
+counters" in the README). Settings are saved 10 minutes after the last change,
+or one hour after the first unsaved one at the latest; the counters once an
+hour. A setpoint that an automation keeps adjusting is therefore still written
+to flash about once an hour.
 
-Two options control this. Both default to `true`, which is upstream's behaviour.
+Two options control this. Both default to `true`.
 
 ```yaml
 flexit_modbus_server:
@@ -60,34 +93,23 @@ Things to know when turning them off:
 - **Old data is not erased.** Turning an option back on restores whatever was
   saved before it was turned off.
 
-## Echoed exception responses are not answered
+## Choosing the library branch
 
-Some RS485 transceivers echo the ESP's own transmissions back into RX. An
-exception response sent by the component then arrives as an incoming frame, is
-answered with another exception, and that answer is byte-identical to the frame
-that caused it. The loop never ends: 2748 such frames were counted in a
-60 second capture, about as many as the CS60's own requests.
+The component is built on
+[MSkjel/ESP-ModbusRTUServer](https://github.com/MSkjel/ESP-ModbusRTUServer).
+Upstream's `modbus_library_ref` option picks the branch, tag or commit to build
+against. Without it the library's `main` is used.
 
-A frame with bit 7 set in the function code is a response, never a request, so
-the frame splitter now consumes it without dispatching it. `onInvalidFunction`
-also masks bit 7 before replying. Boards that do not echo are unaffected.
+```yaml
+flexit_modbus_server:
+  - id: server
+    uart_id: modbus_uart
+    address: 1
+    modbus_library_ref: dev
+```
 
-The library's echo filter ([below](#modbusrtuserver-is-built-from-its-dev-branch))
-now drops a complete echo before the splitter sees it. This check stays for
-whatever gets past the filter.
-
-## `PRIu32` for the baud rate log
-
-`dump_config` printed a `uint32_t` with `%u`, which draws a format warning on
-ESP32. It was the only compiler warning in the component.
-
-## ModbusRTUServer is built from its `dev` branch
-
-`__init__.py` fetches
-[MSkjel/ESP-ModbusRTUServer](https://github.com/MSkjel/ESP-ModbusRTUServer) at
-commit `75e0881`, the head of its `dev` branch on 2026-10-12, instead of `main`.
-
-`dev` is `main` plus one commit, which does two things:
+`flexit-test.yaml` builds against `dev`. On 2026-10-12 that is `main` plus one
+commit (`75e0881`), which does two things:
 
 - **Echo filter.** Bytes that match the frame the library just sent are held
   back, and dropped once the whole frame has come back. Anything else is passed
@@ -103,11 +125,12 @@ Things to know:
   exception on the bus, because the driver is not enabled for it. With `dev`
   exceptions are transmitted. This has not been tested on such a board; the
   installation behind this fork has no `tx_enable_pin`.
-- **Updating the library:** change the commit hash in `__init__.py`. ESPHome
-  clones a library once and reuses that clone, so a new commit on `dev` is not
-  picked up by itself.
-- **Local copies still win:** as upstream, a `ModbusRTUServer.h` or `.cpp` in the
-  component folder is used instead of the fetched library.
+- **Updating the library:** ESPHome clones a library once and reuses that clone,
+  so a new commit on `dev` is not picked up by itself. Use Clean Build Files, or
+  set `modbus_library_ref` to the commit hash and change it to update.
+- **Local copies still win:** a `ModbusRTUServer.h` or `.cpp` in the component
+  folder is used instead of the fetched library, and `modbus_library_ref` is
+  then ignored.
 
 ## Using this branch
 
@@ -130,5 +153,4 @@ standalone configuration.
 - `main` is synced with upstream and then merged into `live`. `live` is never
   rebased, because installations build from it.
 - `git diff main live` shows everything this fork changes.
-- Changes meant for upstream go on their own branches cut from `main`, without
-  the library link.
+- Changes meant for upstream go on their own branches cut from `main`.

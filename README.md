@@ -36,7 +36,7 @@ This project implements a Modbus server for Flexit ventilation systems using ESP
 
 - **Supply Air Temperature:** Can only be set if no CI600 is connected (CS60 limitation).
 - **Startup Order:** ESP must be powered on before CS60, or CS60 won’t poll it.
-- **Settings read-back:** Settings are read from what the CS60 broadcasts: all of them when the CS60 starts, and every change made from any panel. The ESP saves them to flash and loads them on boot, so if a setting was changed on the CI600 while the ESP was off it shows the old value until it changes again or the CS60 restarts. On a fresh install they show up once the CS60 has restarted with the ESP running.
+- **Settings read-back:** Settings are read from what the CS60 broadcasts: all of them when the CS60 starts, and every change made from any panel. The ESP saves them to flash and loads them on boot, so if a setting was changed on the CI600 while the ESP was off it shows the old value until it changes again or the CS60 restarts. On a fresh install they show up once the CS60 has restarted with the ESP running. To spare the flash, changes are saved once the settings have stayed the same for 10 minutes, or after an hour if they keep changing, and always before a reboot or update.
 - **Runtime counters:** The CS60 only sends a counter word when it changes, so the ESP saves them to flash and loads them on boot. On a fresh install they show as unknown until the CS60 has sent both words (at the latest when it restarts).
 - **Address:** Address 1 is required for Heater On/Off to function, but this wont work if you have a CI600 connected.
 
@@ -159,6 +159,10 @@ and two optional ones that depend on your RS485 hardware:
 `flexit_ref` selects the branch or tag for both the packages and the component, e.g. `dev` to test a
 branch or a release tag to pin a version. While testing a branch you keep pushing to, set
 `flexit_refresh: 0s` so every build fetches the latest commit.
+
+`modbus_library_ref` does the same for [ESP-ModbusRTUServer](https://github.com/MSkjel/ESP-ModbusRTUServer),
+the Modbus library the component is built on (default `main`). `flexit_refresh` doesn't apply to it:
+PlatformIO keeps the copy it downloaded, so to get new commits on the same branch use Clean Build Files.
 
 ### In Home Assistant
 
