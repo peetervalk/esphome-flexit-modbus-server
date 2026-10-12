@@ -67,6 +67,9 @@ void FlexitModbusServer::dump_config() {
     ESP_LOGCONFIG(TAG, "  TX Enable Direct: %s", tx_enable_direct_ ? "YES" : "NO");
   }
 
+  ESP_LOGCONFIG(TAG, "  Persist Settings: %s", persist_settings_ ? "YES" : "NO");
+  ESP_LOGCONFIG(TAG, "  Persist Runtime Counters: %s", persist_runtime_counters_ ? "YES" : "NO");
+
 #ifdef USE_FLEXIT_TCP_BRIDGE
   ESP_LOGCONFIG(TAG, "  TCP Bridge Enabled: %s", tcp_bridge_enabled_ ? "YES" : "NO");
 
@@ -215,6 +218,9 @@ void FlexitModbusServer::collect_settings_(SavedSettings &out) {
 }
 
 void FlexitModbusServer::restore_settings_() {
+  if (!persist_settings_)
+    return;
+
   settings_pref_ = global_preferences->make_preference<SavedSettings>(fnv1_hash("flexit_settings"), true);
 
   if (!settings_pref_.load(&saved_settings_)) {
@@ -233,6 +239,9 @@ void FlexitModbusServer::restore_settings_() {
 }
 
 void FlexitModbusServer::save_settings_if_changed_() {
+  if (!persist_settings_)
+    return;
+
   SavedSettings current;
   collect_settings_(current);
 
@@ -287,6 +296,9 @@ void FlexitModbusServer::on_registers_written_(uint16_t start, uint16_t count) {
 }
 
 void FlexitModbusServer::restore_runtime_() {
+  if (!persist_runtime_counters_)
+    return;
+
   runtime_pref_ = global_preferences->make_preference<SavedRuntime>(fnv1_hash("flexit_runtime"), true);
 
   if (!runtime_pref_.load(&saved_runtime_)) {
@@ -306,6 +318,9 @@ void FlexitModbusServer::restore_runtime_() {
 }
 
 void FlexitModbusServer::save_runtime_if_needed_() {
+  if (!persist_runtime_counters_)
+    return;
+
   SavedRuntime current{};
   for (size_t i = 0; i < NUM_RUNTIME_COUNTERS; i++) {
     if (!runtime_known_(i))
@@ -383,6 +398,14 @@ void FlexitModbusServer::set_tx_enable_pin(int16_t pin) {
 
 void FlexitModbusServer::set_tx_enable_direct(bool val) {
   tx_enable_direct_ = val;
+}
+
+void FlexitModbusServer::set_persist_settings(bool val) {
+  persist_settings_ = val;
+}
+
+void FlexitModbusServer::set_persist_runtime_counters(bool val) {
+  persist_runtime_counters_ = val;
 }
 
 #ifdef USE_FLEXIT_TCP_BRIDGE
