@@ -12,19 +12,20 @@ this page says otherwise.
 
 ## Summary
 
-Status as of 2026-10-12, with upstream `main` merged at `6e6d21f`.
+Status as of 2026-10-13, with upstream `main` merged at `591e789`.
 
 | Change | Files | Proposed upstream? |
 |---|---|---|
 | [Echoed exception responses are not answered](#echoed-exception-responses-are-not-answered) | component | Not yet |
-| [`PRIu32` for the baud rate log](#priu32-for-the-baud-rate-log) | component | Not yet |
 
 Nothing in `packages/`, `example.yaml` or the README is changed.
 [`flexit-test.yaml`](flexit-test.yaml) is the configuration of the installation
 behind this fork.
 
-Two earlier differences are gone, because upstream has them now:
+Three earlier differences are gone, because upstream has them now:
 
+- **`PRIu32` for the baud rate log.** Upstream fixed the format warning in
+  `dump_config` in PR #36.
 - **Flash persistence can be turned off.** `persist_settings` and
   `persist_runtime_counters` were merged in upstream PR #33. They are described
   [below](#the-persistence-options), because the upstream README does not
@@ -48,12 +49,7 @@ also masks bit 7 before replying. Boards that do not echo are unaffected.
 The library's echo filter (see
 [Choosing the library branch](#choosing-the-library-branch)) drops a complete
 echo before the splitter sees it. This check stays for whatever gets past the
-filter, and for builds against a library branch without it.
-
-## `PRIu32` for the baud rate log
-
-`dump_config` printed a `uint32_t` with `%u`, which draws a format warning on
-ESP32. It was the only compiler warning in the component.
+filter, and for builds against a library commit from before it.
 
 ## The persistence options
 
@@ -108,8 +104,9 @@ flexit_modbus_server:
     modbus_library_ref: dev
 ```
 
-`flexit-test.yaml` builds against `dev`. On 2026-10-12 that is `main` plus one
-commit (`75e0881`), which does two things:
+`flexit-test.yaml` builds against `dev`. On 2026-10-13 `dev` and `main` have
+the same code: commit `75e0881` was merged into `main` in library PR #7, so the
+option is no longer needed to get it. That commit does two things:
 
 - **Echo filter.** Bytes that match the frame the library just sent are held
   back, and dropped once the whole frame has come back. Anything else is passed
@@ -121,13 +118,13 @@ commit (`75e0881`), which does two things:
 
 Things to know:
 
-- **Boards with a `tx_enable_pin`:** the library on `main` never puts an
-  exception on the bus, because the driver is not enabled for it. With `dev`
+- **Boards with a `tx_enable_pin`:** before `75e0881` the library never put an
+  exception on the bus, because the driver was not enabled for it. Now
   exceptions are transmitted. This has not been tested on such a board; the
   installation behind this fork has no `tx_enable_pin`.
 - **Updating the library:** ESPHome clones a library once and reuses that clone,
-  so a new commit on `dev` is not picked up by itself. Use Clean Build Files, or
-  set `modbus_library_ref` to the commit hash and change it to update.
+  so a new commit on a branch is not picked up by itself. Use Clean Build Files,
+  or set `modbus_library_ref` to the commit hash and change it to update.
 - **Local copies still win:** a `ModbusRTUServer.h` or `.cpp` in the component
   folder is used instead of the fetched library, and `modbus_library_ref` is
   then ignored.
