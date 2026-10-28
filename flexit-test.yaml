@@ -39,9 +39,9 @@ esphome:
               v = fan;                                        // Normal: take what the unit runs
               id(fan_normal)->publish_state(v);               // HA only, no flash
             }
-            // Serve it for supply and extract, without raising the coil.
-            srv->write_holding_register(REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL,  v);
-            srv->write_holding_register(REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL, v);
+#            // Serve it for supply and extract, without raising the coil.
+#            srv->write_holding_register(REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL,  v);
+#            srv->write_holding_register(REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL, v);
 
 esp32:
   variant: esp32
@@ -49,8 +49,8 @@ esp32:
     type: arduino
     advanced:
       minimum_chip_revision: "3.1"
-      sram1_as_iram: false
-      
+      sram1_as_iram: true
+      flash_chip: generic
 wifi:
   ssid: !secret wifi_ssid2
   password: !secret wifi_password
@@ -85,7 +85,7 @@ external_components:
     components:
       - flexit_modbus_server
     refresh: 0s
-      
+
 debug:
   update_interval: 30s
 
@@ -101,9 +101,9 @@ flexit_modbus_server:
     uart_id: modbus_uart
     address: 1
     tcp_bridge_enabled: true   # listens on port 502
-    # ESP-ModbusRTUServer branch, tag or commit. dev has the RS485 echo filter.
+    # ESP-ModbusRTUServer branch, tag or commit.
     # A branch is cloned once: use Clean Build Files to pick up new commits.
-    modbus_library_ref: dev
+    modbus_library_ref: main
     # The component keeps nothing in flash (both default to true, as upstream).
     # Min/Max are restored by the numbers below; Normal is never saved.
     persist_settings: false
@@ -121,7 +121,7 @@ text_sensor:
   - platform: debug
     reset_reason:
       name: "Reset reason"
-      
+
 number:
   # Min/Max are the speeds the CS60 uses in its Min and Max modes, so they only
   # take visible effect once that mode is active (or the MAX timer runs).
@@ -179,15 +179,17 @@ number:
           id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX, (uint16_t)x);
           id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX, (uint16_t)x);
 
-          
+
 sensor:
+  # Temperatures are signed (x0.1 °C). read_holding_register_temperature() casts to
+  # int16_t first; read_holding_register() / 10.0 turns -0.1 °C into 6553.5 °C.
   - platform: template
     name: "Temperature Setpoint"
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
     force_update: true
-    lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_TEMPERATURE_SETPOINT) / 10.0;"
+    lambda: "return id(server)->read_holding_register_temperature(flexit_modbus_server::REG_TEMPERATURE_SETPOINT);"
     update_interval: 30s
 
   - platform: template
@@ -196,7 +198,7 @@ sensor:
     device_class: temperature
     state_class: measurement
     force_update: true
-    lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_TEMPERATURE_SUPPLY_AIR) / 10.0;"
+    lambda: "return id(server)->read_holding_register_temperature(flexit_modbus_server::REG_TEMPERATURE_SUPPLY_AIR);"
     update_interval: 30s
 
   - platform: template
@@ -205,7 +207,7 @@ sensor:
     device_class: temperature
     state_class: measurement
     force_update: true
-    lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_TEMPERATURE_EXTRACT_AIR) / 10.0;"
+    lambda: "return id(server)->read_holding_register_temperature(flexit_modbus_server::REG_TEMPERATURE_EXTRACT_AIR);"
     update_interval: 30s
 
   - platform: template
@@ -214,7 +216,7 @@ sensor:
     device_class: temperature
     state_class: measurement
     force_update: true
-    lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_TEMPERATURE_OUTDOOR_AIR) / 10.0;"
+    lambda: "return id(server)->read_holding_register_temperature(flexit_modbus_server::REG_TEMPERATURE_OUTDOOR_AIR);"
     update_interval: 30s
 
   - platform: template
@@ -248,7 +250,7 @@ sensor:
   - platform: debug
     free:
       name: "Free heap"
-      
+
   - platform: wifi_signal
     name: "WiFi signal"
     update_interval: 60s
@@ -274,9 +276,9 @@ switch:
     restore_mode: DISABLED
     lambda: "return id(server)->read_holding_register(flexit_modbus_server::REG_STATUS_HEATER);"
     turn_on_action:
-      - lambda: "id(server)->send_cmd(flexit_modbus_server::REG_CMD_HEATER, 1);"
+      - lambda: "id(server)->send_cmd(flexit_modbus_server::REG_CMD_HEATER_PANEL1, 1);"
     turn_off_action:
-      - lambda: "id(server)->send_cmd(flexit_modbus_server::REG_CMD_HEATER, 0);"
+      - lambda: "id(server)->send_cmd(flexit_modbus_server::REG_CMD_HEATER_PANEL1, 0);"
 
 
   - platform: gpio
@@ -284,7 +286,7 @@ switch:
     name: "Dry contact"
     id: dry_contact
     restore_mode: ALWAYS_OFF
-    
+
 button:
   - platform: template
     name: "Clear Alarms"
