@@ -32,7 +32,6 @@ counted but not dispatched.
 import argparse
 import json
 from collections import Counter
-from typing import Optional
 
 # flexit_modbus_server.h, and the sizes passed to ModbusRTUServer::begin()
 MIN_FRAME_LENGTH = 5
@@ -104,7 +103,7 @@ class EchoFilter:
 
         self.dropped_frames = 0
         self.dropped_bytes = 0
-        self.releases = []          # (held bytes, expected byte, received byte)
+        self.releases = []  # (held bytes, expected byte, received byte)
         self.overflows = 0
 
     def clear(self):
@@ -115,7 +114,7 @@ class EchoFilter:
         self.frame_index = 0
 
     def release(self):
-        self.buffer.extend(self.echo[self.frame_start:self.pos])
+        self.buffer.extend(self.echo[self.frame_start : self.pos])
         self.clear()
 
     def expect(self, frame: bytes):
@@ -123,7 +122,10 @@ class EchoFilter:
         if not self.enabled or len(frame) > ECHO_SIZE:
             return
 
-        if len(self.frame_ends) >= ECHO_MAX_FRAMES or len(self.echo) + len(frame) > ECHO_SIZE:
+        if (
+            len(self.frame_ends) >= ECHO_MAX_FRAMES
+            or len(self.echo) + len(frame) > ECHO_SIZE
+        ):
             self.overflows += 1
             self.clear()
 
@@ -136,7 +138,7 @@ class EchoFilter:
             return False
 
         if byte != self.echo[self.pos]:
-            held = bytes(self.echo[self.frame_start:self.pos])
+            held = bytes(self.echo[self.frame_start : self.pos])
             self.releases.append((held, self.echo[self.pos], byte))
             self.release()
             return False
@@ -179,7 +181,7 @@ class Splitter:
             if length > available:
                 break
 
-            frame = bytes(data[offset:offset + length])
+            frame = bytes(data[offset : offset + length])
             if not crc_ok(frame):
                 offset += 1
                 self.resync_bytes += 1
@@ -192,10 +194,10 @@ class Splitter:
         return frames
 
 
-def expected_reply(frame: bytes, address: int) -> Optional[tuple[int, int]]:
+def expected_reply(frame: bytes, address: int) -> tuple[int, int] | None:
     """Function code and length of the reply the ESP owes for this frame, if any."""
     if frame[0] != address:
-        return None                 # a broadcast, or meant for another server
+        return None  # a broadcast, or meant for another server
 
     function = frame[1]
     start = (frame[2] << 8) | frame[3]
@@ -207,7 +209,11 @@ def expected_reply(frame: bytes, address: int) -> Optional[tuple[int, int]]:
             return exception
         return (function, 5 + ((quantity + 7) >> 3))
     if function == 0x03:
-        if quantity < 1 or quantity > 125 or start + quantity > MAX_NUM_HOLDING_REGISTERS:
+        if (
+            quantity < 1
+            or quantity > 125
+            or start + quantity > MAX_NUM_HOLDING_REGISTERS
+        ):
             return exception
         return (function, 5 + quantity * 2)
     if function == 0x04:
@@ -217,9 +223,11 @@ def expected_reply(frame: bytes, address: int) -> Optional[tuple[int, int]]:
     if function == 0x06:
         return exception if start >= MAX_NUM_HOLDING_REGISTERS else (function, 8)
     if function == 0x10:
-        return exception if start + quantity > MAX_NUM_HOLDING_REGISTERS else (function, 8)
+        return (
+            exception if start + quantity > MAX_NUM_HOLDING_REGISTERS else (function, 8)
+        )
     if function == 0x65:
-        return None                 # clears the command coil, no reply
+        return None  # clears the command coil, no reply
     return exception
 
 
@@ -252,7 +260,11 @@ def describe_reply(frame: bytes) -> str:
 
 
 def short_hex(data: bytes, limit: int = 24) -> str:
-    return data.hex() if len(data) <= limit else f"{data[:limit].hex()}... ({len(data)} bytes)"
+    return (
+        data.hex()
+        if len(data) <= limit
+        else f"{data[:limit].hex()}... ({len(data)} bytes)"
+    )
 
 
 def load_flushes(path: str) -> list[tuple[float, bytes, bytes]]:
@@ -287,14 +299,14 @@ def replay(flushes: list, address: int, filter_enabled: bool) -> dict:
     splitter = Splitter()
     echo = EchoFilter(splitter.buffer, filter_enabled)
 
-    owed = []               # (reply, request) the ESP still has to answer
+    owed = []  # (reply, request) the ESP still has to answer
     received = Counter()
     matched = 0
-    mismatches = []         # (time, request, reply the ESP sent)
-    unsolicited = []        # (time, reply the ESP sent)
+    mismatches = []  # (time, request, reply the ESP sent)
+    unsolicited = []  # (time, reply the ESP sent)
     exception_frames = 0
     rx_bytes = 0
-    coils = {}              # start address of the coil poll -> coils set
+    coils = {}  # start address of the coil poll -> coils set
     events = []
 
     for index, (t, tx, rx) in enumerate(flushes):
@@ -313,7 +325,9 @@ def replay(flushes: list, address: int, filter_enabled: bool) -> dict:
         for frame in splitter.run():
             if frame[1] & 0x80:
                 exception_frames += 1
-                events.append((t, f"RX  exception response {frame.hex()}, not dispatched"))
+                events.append(
+                    (t, f"RX  exception response {frame.hex()}, not dispatched")
+                )
                 continue
 
             broadcast = " (broadcast)" if frame[0] == 0 else ""
@@ -323,7 +337,9 @@ def replay(flushes: list, address: int, filter_enabled: bool) -> dict:
             if reply:
                 owed.append((reply, frame))
             # The coil polls and the status broadcasts repeat all the time
-            if frame[1] not in (0x01, 0x10) and not (frame[1] == 0x06 and frame[0] == 0):
+            if frame[1] not in (0x01, 0x10) and not (
+                frame[1] == 0x06 and frame[0] == 0
+            ):
                 events.append((t, "RX  " + describe(frame)))
 
         if not owed:
@@ -336,11 +352,16 @@ def replay(flushes: list, address: int, filter_enabled: bool) -> dict:
                 matched += 1
                 if tx[1] == 0x01:
                     start = (request[2] << 8) | request[3]
-                    now_set = [start + i * 8 + bit
-                               for i, byte in enumerate(tx[3:3 + tx[2]])
-                               for bit in range(8) if byte >> bit & 1]
+                    now_set = [
+                        start + i * 8 + bit
+                        for i, byte in enumerate(tx[3 : 3 + tx[2]])
+                        for bit in range(8)
+                        if byte >> bit & 1
+                    ]
                     if coils.get(start, []) != now_set:
-                        listed = ", ".join(f"0x{coil:03X}" for coil in now_set) or "none"
+                        listed = (
+                            ", ".join(f"0x{coil:03X}" for coil in now_set) or "none"
+                        )
                         events.append((t, f"TX  Coils set from {start}: {listed}"))
                     coils[start] = now_set
                 else:
@@ -367,18 +388,24 @@ def print_replay(title: str, result: dict, sent: int):
     print(f"\n=== {title} ===")
     print(f"  RX bytes: {result['rx_bytes']}")
     if echo.enabled:
-        print(f"  Echoes dropped: {echo.dropped_frames} of {sent} frames sent ({echo.dropped_bytes} bytes)")
+        print(
+            f"  Echoes dropped: {echo.dropped_frames} of {sent} frames sent ({echo.dropped_bytes} bytes)"
+        )
         print(f"  Held bytes released after a mismatch: {len(echo.releases)}")
         for held, expected, got in echo.releases[:5]:
-            print(f"    after {len(held)} bytes: expected {expected:02X}, got {got:02X}")
+            print(
+                f"    after {len(held)} bytes: expected {expected:02X}, got {got:02X}"
+            )
         if echo.overflows:
             print(f"  Echo buffer overflows: {echo.overflows}")
     print(f"  Bytes the splitter skipped to resync: {result['splitter'].resync_bytes}")
-    print(f"  Frames received:")
+    print("  Frames received:")
     for name, count in sorted(result["received"].items()):
         print(f"    {name:38s} x{count}")
     if result["exception_frames"]:
-        print(f"    Exception responses (bit 7 set)        x{result['exception_frames']}")
+        print(
+            f"    Exception responses (bit 7 set)        x{result['exception_frames']}"
+        )
     print(f"  Replies owed that the ESP sent: {result['matched']}")
     print(f"  Replies that do not fit the request: {len(result['mismatches'])}")
     for t, request, tx in result["mismatches"][:5]:
@@ -395,19 +422,15 @@ def main():
         description="Replay a TCP bridge capture with and without the RS485 echo filter"
     )
     parser.add_argument(
-        "capture",
-        help="File from tcp_bridge_capture.py or tcp_bridge_watch_command.py"
+        "capture", help="File from tcp_bridge_capture.py or tcp_bridge_watch_command.py"
     )
     parser.add_argument(
-        "--address",
-        type=int,
-        default=1,
-        help="Modbus address of the ESP (default: 1)"
+        "--address", type=int, default=1, help="Modbus address of the ESP (default: 1)"
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="List the command traffic: register reads, 0x65 and coil changes"
+        help="List the command traffic: register reads, 0x65 and coil changes",
     )
 
     args = parser.parse_args()
@@ -418,7 +441,9 @@ def main():
         return
 
     sent = Counter((tx[1], len(tx)) for _, tx, _ in flushes)
-    print(f"{len(flushes)} replies from the ESP in {flushes[-1][0] - flushes[0][0]:.1f} s")
+    print(
+        f"{len(flushes)} replies from the ESP in {flushes[-1][0] - flushes[0][0]:.1f} s"
+    )
     for (function, length), count in sorted(sent.items()):
         print(f"  function 0x{function:02X}, {length} bytes  x{count}")
 
@@ -429,11 +454,15 @@ def main():
     print_replay("Replay without the echo filter", without_filter, len(flushes) - 1)
 
     fits_with = not with_filter["mismatches"] and not with_filter["unsolicited"]
-    fits_without = not without_filter["mismatches"] and not without_filter["unsolicited"]
+    fits_without = (
+        not without_filter["mismatches"] and not without_filter["unsolicited"]
+    )
 
     print("\n=== Result ===")
     if fits_with and fits_without:
-        print("  Both replays fit what the ESP sent, so this capture cannot tell them apart.")
+        print(
+            "  Both replays fit what the ESP sent, so this capture cannot tell them apart."
+        )
         print("  Record a command with tcp_bridge_watch_command.py to find out.")
     elif fits_with:
         print("  The ESP behaves like the replay WITH the echo filter.")

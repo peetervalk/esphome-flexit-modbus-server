@@ -121,6 +121,8 @@ sensor:
     name: "Heat Exchanger Efficiency"
   - id: !extend heating_percentage
     name: "Heater Power"
+  # No water coil on this unit, so no return water temperature or its alarms
+  - id: !remove return_water_temperature
 
   # --- Diagnostics: so reboots and weak WiFi are finally visible ---
   - platform: uptime
@@ -143,6 +145,9 @@ text_sensor:
       name: "Reset reason"
 
 binary_sensor:
+  - id: !remove alarm_return_water_sensor_faulty
+  - id: !remove alarm_water_coil_faulty
+
   - platform: status
     name: "Status"
 

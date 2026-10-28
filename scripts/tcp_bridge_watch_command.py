@@ -12,6 +12,7 @@ Trigger the command yourself, for example by changing the fan speed.
 """
 
 import argparse
+import contextlib
 import json
 import socket
 import sys
@@ -42,27 +43,20 @@ def main():
     parser = argparse.ArgumentParser(
         description="Record one command handshake from the TCP bridge"
     )
+    parser.add_argument("--host", required=True, help="ESP IP address")
     parser.add_argument(
-        "--host",
-        required=True,
-        help="ESP IP address"
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=502,
-        help="TCP bridge port (default: 502)"
+        "--port", type=int, default=502, help="TCP bridge port (default: 502)"
     )
     parser.add_argument(
         "--max-seconds",
         type=float,
         default=600,
-        help="Give up when no command is seen for this long (default: 600)"
+        help="Give up when no command is seen for this long (default: 600)",
     )
     parser.add_argument(
         "--output",
         default="command.jsonl",
-        help="File to write (default: command.jsonl)"
+        help="File to write (default: command.jsonl)",
     )
 
     args = parser.parse_args()
@@ -70,7 +64,7 @@ def main():
     print(f"Connecting to {args.host}:{args.port}...")
     try:
         sock = socket.create_connection((args.host, args.port), timeout=5.0)
-    except Exception as e:
+    except OSError as e:
         print(f"ERROR: Could not connect: {e}")
         sys.exit(1)
 
@@ -78,63 +72,65 @@ def main():
 
     start = time.monotonic()
     backlog = deque(maxlen=BACKLOG_BLOCKS)
-    coils_set = {}      # byte count of the coil reply -> any bit set
+    coils_set = {}  # byte count of the coil reply -> any bit set
     set_at = None
     clear_at = None
     result = "No command seen."
     f = None
+    # The file is opened once a command shows up, and closed when the watching ends
+    with contextlib.ExitStack() as files:
+        try:
+            while True:
+                now = time.monotonic() - start
+                if set_at is None and now > args.max_seconds:
+                    break
 
-    try:
-        while True:
-            now = time.monotonic() - start
-            if set_at is None and now > args.max_seconds:
-                break
+                header = recv_exact(sock, 3)
+                payload = recv_exact(sock, (header[1] << 8) | header[2])
+                record = {
+                    "t": round(time.monotonic() - start, 4),
+                    "wall": datetime.now().isoformat(timespec="milliseconds"),
+                    "dir": chr(header[0]),
+                    "hex": payload.hex(),
+                }
+                if f:
+                    f.write(json.dumps(record) + "\n")
+                else:
+                    backlog.append(record)
 
-            header = recv_exact(sock, 3)
-            payload = recv_exact(sock, (header[1] << 8) | header[2])
-            record = {
-                "t": round(time.monotonic() - start, 4),
-                "wall": datetime.now().isoformat(timespec="milliseconds"),
-                "dir": chr(header[0]),
-                "hex": payload.hex(),
-            }
-            if f:
-                f.write(json.dumps(record) + "\n")
-            else:
-                backlog.append(record)
+                # The CS60 polls the coils in two requests, told apart by the byte count
+                if record["dir"] == "T" and len(payload) > 5 and payload[1] == 0x01:
+                    coils_set[payload[2]] = any(payload[3 : 3 + payload[2]])
+                    pending = any(coils_set.values())
 
-            # The CS60 polls the coils in two requests, told apart by the byte count
-            if record["dir"] == "T" and len(payload) > 5 and payload[1] == 0x01:
-                coils_set[payload[2]] = any(payload[3:3 + payload[2]])
-                pending = any(coils_set.values())
+                    if pending and set_at is None:
+                        set_at = now
+                        # Start the file on a T block, so that every R block follows its T
+                        while backlog and backlog[0]["dir"] != "T":
+                            backlog.popleft()
+                        f = files.enter_context(open(args.output, "w"))
+                        f.writelines(json.dumps(earlier) + "\n" for earlier in backlog)
+                        print(f"Command coil set at {record['wall']}")
 
-                if pending and set_at is None:
-                    set_at = now
-                    # Start the file on a T block, so that every R block follows its T
-                    while backlog and backlog[0]["dir"] != "T":
-                        backlog.popleft()
-                    f = open(args.output, "w")
-                    for earlier in backlog:
-                        f.write(json.dumps(earlier) + "\n")
-                    print(f"Command coil set at {record['wall']}")
+                    if set_at is not None and clear_at is None and not pending:
+                        clear_at = now
+                        result = f"Command confirmed: coils clear {clear_at - set_at:.2f} s after they were set."
 
-                if set_at is not None and clear_at is None and not pending:
-                    clear_at = now
-                    result = f"Command confirmed: coils clear {clear_at - set_at:.2f} s after they were set."
-
-            if clear_at is not None and now - clear_at > TAIL_SECONDS:
-                break
-            if set_at is not None and clear_at is None and now - set_at > ACK_TIMEOUT_SECONDS:
-                result = f"Coils still set after {ACK_TIMEOUT_SECONDS} s: the command was NOT confirmed."
-                break
-    except KeyboardInterrupt:
-        result = "Stopped by user."
-    except (ConnectionError, socket.timeout) as e:
-        result = f"ERROR: {e}"
-    finally:
-        sock.close()
-        if f:
-            f.close()
+                if clear_at is not None and now - clear_at > TAIL_SECONDS:
+                    break
+                if (
+                    set_at is not None
+                    and clear_at is None
+                    and now - set_at > ACK_TIMEOUT_SECONDS
+                ):
+                    result = f"Coils still set after {ACK_TIMEOUT_SECONDS} s: the command was NOT confirmed."
+                    break
+        except KeyboardInterrupt:
+            result = "Stopped by user."
+        except (TimeoutError, ConnectionError) as e:
+            result = f"ERROR: {e}"
+        finally:
+            sock.close()
 
     print(result)
     if f:

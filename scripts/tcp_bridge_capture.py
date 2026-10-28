@@ -35,27 +35,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Record raw TCP bridge blocks to a JSON-lines file"
     )
+    parser.add_argument("--host", required=True, help="ESP IP address")
     parser.add_argument(
-        "--host",
-        required=True,
-        help="ESP IP address"
+        "--port", type=int, default=502, help="TCP bridge port (default: 502)"
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=502,
-        help="TCP bridge port (default: 502)"
-    )
-    parser.add_argument(
-        "--seconds",
-        type=float,
-        default=60,
-        help="How long to record (default: 60)"
+        "--seconds", type=float, default=60, help="How long to record (default: 60)"
     )
     parser.add_argument(
         "--output",
         default="capture.jsonl",
-        help="File to write (default: capture.jsonl)"
+        help="File to write (default: capture.jsonl)",
     )
 
     args = parser.parse_args()
@@ -63,7 +53,7 @@ def main():
     print(f"Connecting to {args.host}:{args.port}...")
     try:
         sock = socket.create_connection((args.host, args.port), timeout=5.0)
-    except Exception as e:
+    except OSError as e:
         print(f"ERROR: Could not connect: {e}")
         sys.exit(1)
 
@@ -77,16 +67,21 @@ def main():
                 length = (header[1] << 8) | header[2]
                 payload = recv_exact(sock, length)
 
-                f.write(json.dumps({
-                    "t": round(time.monotonic() - start, 4),
-                    "wall": datetime.now().isoformat(timespec="milliseconds"),
-                    "dir": chr(header[0]),
-                    "hex": payload.hex(),
-                }) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "t": round(time.monotonic() - start, 4),
+                            "wall": datetime.now().isoformat(timespec="milliseconds"),
+                            "dir": chr(header[0]),
+                            "hex": payload.hex(),
+                        }
+                    )
+                    + "\n"
+                )
                 blocks += 1
         except KeyboardInterrupt:
             print("Stopped by user.")
-        except (ConnectionError, socket.timeout) as e:
+        except (TimeoutError, ConnectionError) as e:
             print(f"ERROR: {e}")
         finally:
             sock.close()
