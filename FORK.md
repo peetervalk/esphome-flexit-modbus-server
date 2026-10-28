@@ -18,10 +18,13 @@ panel support, PR #39).
 | Change | Files | Proposed upstream? |
 |---|---|---|
 | [Echoed exception responses are not answered](#echoed-exception-responses-are-not-answered) | component, `tests/server_test.cpp` | Not yet |
+| [The packages load the component from this fork](#the-packages-load-the-component-from-this-fork) | `packages/core.yaml` | No, it names this fork |
 
-Nothing in `packages/`, `example.yaml` or the README is changed.
-[`flexit-test.yaml`](flexit-test.yaml) is the configuration of the installation
-behind this fork.
+Nothing else in `packages/`, `example.yaml` or the README is changed.
+[`flexit-modbus.yaml`](flexit-modbus.yaml) is the configuration of the
+installation behind this fork, built on the packages of `live`.
+[`flexit-test.yaml`](flexit-test.yaml) is the standalone configuration it
+replaces, kept as a fallback.
 
 Earlier differences that are gone, because upstream has them now:
 
@@ -56,7 +59,38 @@ dispatched, and `on_fc65_` masks bit 7 before replying. The test "An exception
 of ours that the echo filter missed comes back" in `tests/server_test.cpp` fails
 without these two lines. Boards that do not echo are unaffected.
 
+## The packages load the component from this fork
+
+Upstream's `packages/core.yaml` loads the component from
+`MSkjel/esphome-flexit-modbus-server`, so packages taken from this fork would
+still come with upstream's component. Here `core.yaml` loads it from this fork,
+at `flexit_ref`, which defaults to `live`. Packages and component then come from
+the same branch, and so does the `pbus.c` that both the component and the panel
+packages build.
+
+The component's branch comes from `flexit_ref` alone, so the packages' `ref:`
+should be `${flexit_ref}` too, as below.
+
 ## Using this branch
+
+With the packages, as `example.yaml` shows them, from this fork:
+
+```yaml
+substitutions:
+  flexit_ref: live
+  flexit_refresh: 1d
+
+packages:
+  flexit:
+    url: https://github.com/peetervalk/esphome-flexit-modbus-server
+    ref: ${flexit_ref}
+    refresh: ${flexit_refresh}
+    files:
+      - packages/core.yaml
+      # ...
+```
+
+Or the component alone, in a standalone configuration like `flexit-test.yaml`:
 
 ```yaml
 external_components:
@@ -69,17 +103,15 @@ external_components:
 
 The component needs the whole repository, not just its folder: it builds
 `packages/code/panel/pbus.c`. A git source fetches the whole repository, so
-this works as shown.
-
-`packages/core.yaml` is unchanged and still loads the component from
-`MSkjel/esphome-flexit-modbus-server`. A configuration built on the packages
-therefore gets upstream's component, not this one. This branch is used with a
-standalone configuration. To add the panel packages to it, take them from this
-branch as well, so they and the component use the same copy of `pbus.c`.
+this works as shown. To add the panel packages to a standalone configuration,
+take them from this branch as well, so they and the component use the same copy
+of `pbus.c`.
 
 ## Keeping up with upstream
 
 - `main` is synced with upstream and then merged into `live`. `live` is never
   rebased, because installations build from it.
 - `git diff main live` shows everything this fork changes.
+- An upstream change next to `flexit_ref` or `external_components` in
+  `packages/core.yaml` merges with a conflict. Keep this fork's two lines.
 - Changes meant for upstream go on their own branches cut from `main`.

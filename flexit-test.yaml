@@ -46,7 +46,7 @@ esphome:
 esp32:
   variant: esp32
   framework:
-    type: arduino
+    type: esp-idf
     advanced:
       minimum_chip_revision: "3.1"
       sram1_as_iram: true

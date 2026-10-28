@@ -1,0 +1,217 @@
+# The installation behind this fork, built on the packages of the live branch. flexit-test.yaml is the
+# standalone config this replaces, kept as a fallback.
+#
+# Home Assistant does the control: it works out the normal fan speed from the house's humidity, CO2, PM2.5 and
+# floor heating and sends it to Fan Speed Normal every 5 min, switches Supply Air Regulation from the floor
+# heating's setpoints, and drives Dry contact from the cooker hood. So none of the comfort packages (co2,
+# humidity_boost, summer_cooling, fireplace) are here, they would fight those automations, and fan_speeds.yaml
+# is left out for the combined Min/Normal/Max numbers below. Entities HA uses keep their names, and with them
+# their entity IDs.
+
+substitutions:
+  flexit_tx_pin: GPIO18
+  flexit_rx_pin: GPIO19
+  flexit_address: "1"
+  flexit_ref: live
+  # every build fetches the latest commit of live
+  flexit_refresh: 0s
+
+esphome:
+  name: flexit-modbus
+  friendly_name: Flexit Ventilation
+  on_boot:
+    # Runs after the Modbus server (priority 1000) and the numbers (800) are set up,
+    # and before the server has handled a single frame, so what gets written here is
+    # the first answer the CS60 gets.
+    - priority: -100
+      then:
+        # Min/Max: restored from flash (40/90 if nothing is saved yet). Send them to
+        # the unit once, so a Max-timer press after a reboot finds a valid value. The
+        # coil stays raised until the CS60 confirms with 0x65, so no delay is needed.
+        - lambda: |-
+            using namespace flexit_modbus_server;
+            auto *srv = id(server);
+            auto mn = (uint16_t) id(fan_min)->state;
+            auto mx = (uint16_t) id(fan_max)->state;
+            srv->send_cmd(REG_CMD_PERCENTAGE_SUPPLY_FAN_MIN,  mn);
+            srv->send_cmd(REG_CMD_PERCENTAGE_EXTRACT_FAN_MIN, mn);
+            srv->send_cmd(REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX,  mx);
+            srv->send_cmd(REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX, mx);
+
+        # Normal: wait for the first status block, which has the mode. On timeout,
+        # mode still reads 0 and the lambda below serves the fallback.
+        - wait_until:
+            condition:
+              lambda: 'return id(server)->fresh();'
+            timeout: 10s
+
+        # Mode and supply fan speed arrive in the same frame, so no second wait.
+        - lambda: |-
+            using namespace flexit_modbus_server;
+            auto *srv = id(server);
+            auto v = (uint16_t) id(fan_normal)->state;        // 60, from initial_value
+            uint16_t fan = srv->read_holding_register(REG_PERCENTAGE_SUPPLY_FAN);
+            if (srv->read_holding_register(REG_MODE) == 2 && fan > 0) {
+              v = fan;                                        // Normal: take what the unit runs
+              id(fan_normal)->publish_state(v);               // HA only, no flash
+            }
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+      flash_chip: generic
+
+wifi:
+  ssid: !secret wifi_ssid2
+  password: !secret wifi_password
+
+  reboot_timeout: 15min
+  # Disable modem power-save; it causes the brief dropouts seen in the HA trace.
+  power_save_mode: none
+
+logger:
+  level: DEBUG
+  hardware_uart: UART0
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # Don't reboot when Home Assistant is unreachable (e.g. an HA restart).
+  # Default is 15 min -> a reboot -> CS60 desync. Keep the Modbus link alive.
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    encryption:
+
+debug:
+  update_interval: 30s
+
+packages:
+  flexit:
+    url: https://github.com/peetervalk/esphome-flexit-modbus-server
+    ref: ${flexit_ref}
+    refresh: ${flexit_refresh}
+    files:
+      - packages/core.yaml
+      - packages/controls.yaml
+      - packages/sensors.yaml
+      - packages/diagnostics.yaml
+
+flexit_modbus_server:
+  - id: !extend server
+    tcp_bridge_enabled: true   # listens on port 502
+    # No settings in flash: HA sends Normal every 5 min, and Min/Max are restored by
+    # the numbers below. The runtime counters are saved, about once an hour, because
+    # the CS60 only sends a counter when it changes.
+    persist_settings: false
+    persist_runtime_counters: true
+
+# Package entities under the names HA knows them by
+sensor:
+  - id: !extend setpoint_air_temperature
+    name: "Temperature Setpoint"
+  - id: !extend supply_fan_speed_percentage
+    name: "Supply Fan Speed"
+  - id: !extend heat_exchanger_percentage
+    name: "Heat Exchanger Efficiency"
+  - id: !extend heating_percentage
+    name: "Heater Power"
+
+  # --- Diagnostics: so reboots and weak WiFi are finally visible ---
+  - platform: uptime
+    name: "Uptime"
+
+  - platform: debug
+    free:
+      name: "Free heap"
+
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+
+text_sensor:
+  - id: !extend current_mode
+    name: "Ventilation Mode"
+
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+
+binary_sensor:
+  - platform: status
+    name: "Status"
+
+switch:
+  # The setting only reaches the ESP when the CS60 starts, and persist_settings is off,
+  # so after a reboot the switch puts its own last state back on the unit.
+  - id: !extend supply_air_control
+    name: "Supply Air Regulation"
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: gpio
+    pin: GPIO25
+    name: "Dry contact"
+    id: dry_contact
+    restore_mode: ALWAYS_OFF
+
+number:
+  # Min/Max are the speeds the CS60 uses in its Min and Max modes, so they only
+  # take visible effect once that mode is active (or the MAX timer runs).
+  # None of the three reads back a register: the CS60 stores no setpoints, and the
+  # command registers read 0 after a boot. Boot values come from esphome: on_boot.
+  # No lambdas here: a lambda turns off restore_value and initial_value.
+  - platform: template
+    id: fan_min
+    name: "Fan Speed Minimum"
+    unit_of_measurement: "%"
+    mode: box
+    min_value: 1
+    max_value: 100
+    step: 1
+    optimistic: true
+    restore_value: true   # written to flash only when you change it
+    initial_value: 40     # used only when nothing is saved yet
+    set_action:
+      - lambda: |-
+          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MIN, (uint16_t)x);
+          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MIN, (uint16_t)x);
+
+  # Set by the HA automation every 5 min, so no restore_value: never written to
+  # flash. Starts at 60 on every boot; on_boot replaces that with the unit's
+  # running speed if the unit is in Normal.
+  - platform: template
+    id: fan_normal
+    name: "Fan Speed Normal"
+    unit_of_measurement: "%"
+    mode: box
+    min_value: 1
+    max_value: 100
+    step: 1
+    optimistic: true
+    initial_value: 60     # the fixed fallback
+    set_action:
+      - lambda: |-
+          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_NORMAL, (uint16_t)x);
+          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_NORMAL, (uint16_t)x);
+
+  # Same caveats as Fan Speed Minimum above.
+  - platform: template
+    id: fan_max
+    name: "Fan Speed Maximum"
+    unit_of_measurement: "%"
+    mode: box
+    min_value: 1
+    max_value: 100
+    step: 1
+    optimistic: true
+    restore_value: true   # written to flash only when you change it
+    initial_value: 90     # used only when nothing is saved yet
+    set_action:
+      - lambda: |-
+          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_SUPPLY_FAN_MAX, (uint16_t)x);
+          id(server)->send_cmd(flexit_modbus_server::REG_CMD_PERCENTAGE_EXTRACT_FAN_MAX, (uint16_t)x);
