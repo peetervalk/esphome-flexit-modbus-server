@@ -17,7 +17,7 @@ Status as of 2026-11-05, with upstream `main` merged at `46abb68` (PR #51).
 | Change | Files | Proposed upstream? |
 |---|---|---|
 | [Echoed exception responses are not answered](#echoed-exception-responses-are-not-answered) | component, `tests/server_test.cpp` | Not yet |
-| [The packages load the component from this fork](#the-packages-load-the-component-from-this-fork) | `packages/core.yaml` | No, it names this fork |
+| [The packages load the component from this fork](#the-packages-load-the-component-from-this-fork) | `packages/core.yaml`, `packages/panel/screen_camera.yaml` | No, it names this fork |
 
 Nothing else in `packages/`, `example.yaml` or the README is changed.
 [`flexit-modbus.yaml`](flexit-modbus.yaml) is the configuration of the
@@ -67,6 +67,12 @@ at `flexit_ref`, which defaults to `live`. Packages and component then come from
 the same branch, and so does the `pbus.c` that both the component and the panel
 packages build.
 
+`packages/panel/screen_camera.yaml` loads the `flexit_panel_camera` component
+the same way, and here from this fork too. Upstream's line names its own repo at
+`flexit_ref`, and upstream has no `live`, so with it any configuration with the
+screen camera fails: "couldn't find remote ref live". The CI builds `esp32` and
+`esp32-c3` include it.
+
 The component's branch comes from `flexit_ref` alone, so the packages' `ref:`
 should be `${flexit_ref}` too, as below.
 
@@ -113,6 +119,10 @@ of `pbus.c`.
 - `git diff main live` shows everything this fork changes.
 - An upstream change next to `flexit_ref` or `external_components` in
   `packages/core.yaml` merges with a conflict. Keep this fork's two lines.
+- A new package that loads a component from upstream's repo at `flexit_ref`
+  merges without a conflict and then fails on `live`. After a merge,
+  `git grep 'MSkjel/esphome-flexit-modbus-server.*flexit_ref' -- packages`
+  should find nothing.
 - A merge can bring a component that needs a newer library than the build has.
   ESPHome keeps the copy it downloaded and `flexit_refresh` doesn't apply to
   it, so the first build after such a merge needs Clean Build Files. The merge

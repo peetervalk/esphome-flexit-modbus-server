@@ -12,7 +12,8 @@ defaults:
   category: diagnostic
 
 external_components:
-  - source: github://MSkjel/esphome-flexit-modbus-server@${flexit_ref}
+  # This fork's component, like core.yaml's (FORK.md)
+  - source: github://peetervalk/esphome-flexit-modbus-server@${flexit_ref}
     refresh: ${flexit_refresh}
     components: [flexit_panel_camera]
 
