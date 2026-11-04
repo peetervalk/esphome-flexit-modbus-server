@@ -30,6 +30,17 @@ static void rows(const Canvas &c, const char *art, const char *keys, std::initia
       c.put(x, y, cols.begin()[k - keys]);
   }
 }
+// A rim of col on each empty pixel beside a drawn one, for a pale sprite against a pale sky
+static void outline(const Canvas &c, uint32_t col) {
+  std::vector<uint8_t> in((size_t) (c.w * c.h));
+  for (int i = 0; i < c.w * c.h; i++)
+    in[i] = c.px[i] >> 24 != 0;
+  auto at = [&](int x, int y) { return x >= 0 && y >= 0 && x < c.w && y < c.h && in[y * c.w + x]; };
+  for (int y = 0; y < c.h; y++)
+    for (int x = 0; x < c.w; x++)
+      if (!at(x, y) && (at(x - 1, y) || at(x + 1, y) || at(x, y - 1) || at(x, y + 1)))
+        c.put(x, y, col);
+}
 // 0..99, the same for the same pixel, for ragged edges and thinning out
 static int noise(int x, int y, int k) {
   uint32_t h = ((uint32_t) x * 374761393u + (uint32_t) y * 668265263u + (uint32_t) k * 2246822519u) * 3266489917u;
@@ -38,15 +49,24 @@ static int noise(int x, int y, int k) {
 
 // ---------------------------------------------------------------- shapes the sprites share
 
-// A gull from the front, k: 0 up, 1 upmid, 2 m, 3 m2, 4 flat, 5 down
-static void gull_pose(const Canvas &c, int k, int ox, int oy) {
-  static const char *const LOOK[] = {"k...........k|.g.........g|..ll.....ll|....lwwwl|......wy",
-                                     "|k...........k|.gll.....llg|....lwwwl|......wy",
-                                     "|..lll...lll|.g...l.l...g|k....www....k|......wy",
-                                     "|...ll...ll|.gl..l.l..lg|k....www....k|......wy",
-                                     "|||kggllwwwllggk|......wy",
-                                     "|||....lwwwl|..ll..wy.ll|.g.........g|k...........k"};
-  rows(c, LOOK[k], "kglwy", {0x333344, 0xAAAABB, 0xDDDDEE, 0xFFFFFF, 0xFFBB33}, ox, oy);
+// A herring gull's colours: black wing tips and eye, the dark edge of a wing, its grey back, lighter grey, white, the
+// yellow bill, pink legs and the bill's red spot. Its rim
+static void gull_rows(const Canvas &c, const char *art, int ox = 0, int oy = 0) {
+  rows(c, art, "kdGgwylr", {0x1A2030, 0x788296, 0xA0AABC, 0xC4CCDA, 0xF4F4F4, 0xFAC428, 0xE0A090, 0xDC3C28}, ox, oy);
+}
+static constexpr uint32_t GULL_RIM = 0x4A5468;
+// A gull from the side flying right, from ox + 1, oy + 1 so a rim fits round it. k: its wings 0 up high, 1 up,
+// 2 level, 3 down, 4 down hard, 5 gliding, 6 gliding lower
+static void gull_flying(const Canvas &c, int k, int ox, int oy) {
+  static const char *const WING[] = {"....kk|....kGg|.....GGg|.....GGGg|......GGg|......GGGg|.......GGg",
+                                     "|||.kk|..kGGg|...GGGGg|.....GGGg",
+                                     "|||||kkGGGGGGg",
+                                     "|||||......dGg|.....dGGg|....dGGg|...kGg|..kk",
+                                     "|||||.......Gg|......GGg|......GGg|.....GGg|.....kG|.....kk",
+                                     "|||kk|.kGGGg|...GGGGGg",
+                                     "||||kkGGGg|...GGGGGg"};
+  gull_rows(c, "|||...........www|..........wwwkw|ww.......wwwwwwyy|.wwwwwwwwwwwwww|...gggggggggg", ox + 1, oy + 1);
+  gull_rows(c, WING[k], ox + 1, oy + 1);
 }
 // k: 0 full, 1 luffing, 2 heeled a little, 3 luffing hard as it starts to turn. flip mirrors it
 static void boat_pose(const Canvas &c, int k, bool flip) {
@@ -91,35 +111,169 @@ static void leaf_pose(const Canvas &c, int k) {
                                      "|||.xxxx|xxvxxs|.xxx"};
   rows(c, LOOK[k], "xuvs", {0xEECC33, 0xDDBB44, 0xCCAA22, 0x887755});
 }
-// body high on long legs, a hump over the shoulders, a bell and broad antlers
-static void moose_pose(const Canvas &c, int f, bool graze) {
-  const uint32_t B = 0x221111, D = 0x110000;
-  for (int y = 5; y <= 10; y++)
-    for (int x = 4 + (y > 9); x <= 16 - (y > 9); x++)
-      c.put(x, y, B);
-  for (int x = 12; x <= 16; x++)
-    c.put(x, 4, B);
-  dots(c, {13, 3, 14, 3, 3, 6}, B);
-  int dy = graze && f == 1;
-  static const int8_t HEAD[2][12] = {{16, 19, 3, 17, 21, 4, 18, 22, 5, 19, 23, 6},
-                                     {18, 21, 13, 19, 22, 14, 20, 22, 15}};
-  if (graze) {
-    line(c, 16, 6, 19, 12 + dy, B);
-    line(c, 17, 6, 20, 12 + dy, B);
-    line(c, 16, 7, 19, 13 + dy, B);
+// A hooded crow flying right, from the side, its wings k: 0 up, 1 level, 2 down with their fingers spread. Grey,
+// its head, heavy bill, wings and tail black. legs: hanging, to land
+static void crow_flying(const Canvas &c, int k, int ox, int oy, bool legs) {
+  static const char *const WING[] = {"k.k.k|.kkkk|..kkkk", "||kkkkkk", "|||||.kkkk|.kkkk|k.k.k"};
+  rows(c, "|||.kkggggkkk|kkkggggkkkk", "kg", {0x16161C, 0xA4A6AC}, ox, oy);
+  rows(c, WING[k], "k", {0x16161C}, ox + 1, oy);
+  if (legs)
+    rows(c, "|||||.....k.k", "k", {0x16161C}, ox, oy);
+}
+// An eagle's colours: its darkest, brown, its light coverts, its head or nape, yellow, black, its tail, its eye and
+// a golden eagle's dark face
+static void eagle_rows(const Canvas &c, const char *art, bool sea) {
+  if (sea)
+    rows(c, art, "dblpykweh",
+         {0x2A1E14, 0x5A4430, 0x86684A, 0xE2D6B4, 0xF0C030, 0x1A1410, 0xF6F6F2, 0x3A2A1A, 0xE2D6B4});
+  else
+    rows(c, art, "dblpykweh",
+         {0x241810, 0x4A3424, 0x7A5E40, 0xC8964A, 0xE8C040, 0x2A2A2E, 0x3A2C22, 0x141010, 0x3A2A1C});
+}
+// An eagle from the side flying right, but for its near wing: a white-tailed sea eagle's big pale head, heavy yellow
+// bill and short white tail, or a golden eagle, dark with its crown and nape golden and its tail long
+static void eagle_body(const Canvas &c, bool sea) {
+  eagle_rows(c,
+             sea ? "||||||||..................ppp|................ppppep|wwww.......bbbbbppppyyy|"
+                   "wwwwwbbbbbbbbbbbbbpppyyy|.wwwbbbbbbbbbbbbbbbpp.y|....ddbbbbbbbbbbbbd|........ddddddd"
+                 : "||||||||..................ppp|................ppppeh|wwwwww.....bbbbbbphhhhyk|"
+                   "wwwwwwbbbbbbbbbbbbbhhhkk|..wwwbbbbbbbbbbbbbbbbhk|....ddbbbbbbbbbbbbd|........dlllddd",
+             sea);
+}
+// Its near wing, k: 0 up high, 1 up, 2 level, 3 down, 4 down hard, 5 soaring, a little raised, the fingers spread
+static void eagle_wing(const Canvas &c, int k, bool sea) {
+  static const char *const WING[] = {
+      "....k.k.k|.....kkkkk|......ddddd|......dddddd|.......ddddddd|........dddddll|.........ddddlll|"
+      "..........dddllll|...........ddllll|............dllll",
+      "|||...k.k.k|....kkkkdd|.....dddddddl|.......ddddddlll|.........dddddllll|...........dddllll",
+      "||||||||.k.k.dddddllll|..kkdddddlllll",
+      "||||||||||||...........ddlll|..........ddddddd|.........dddddd|........ddddd|.......kkkk|......k.k.k",
+      "||||||||||||............dlll|............ddddd|............dddd|...........dddd|..........kkkk|"
+      "..........k.k.k",
+      "||||||.k.k|..kkddd|...ddddddlll|.....dddddllll"};
+  eagle_rows(c, WING[k], sea);
+}
+// Four keys of n numbers each, a stride, in 8 frames: frame f's numbers, the odd frames' halfway to the next key
+static void stride(const int8_t *keys, int n, int f, int8_t *out) {
+  const int8_t *a = keys + f / 2 * n, *b = keys + (f / 2 + 1) % 4 * n;
+  for (int i = 0; i < n; i++)
+    out[i] = (int8_t) (f % 2 ? (a[i] + b[i] + (b[i] > a[i])) / 2 : a[i]);  // rounded toward the next
+}
+// A rock ptarmigan walking right, frames 0-7 its steps, then standing and pecking. In summer mottled grey-brown with
+// a white belly, in winter all white but for its black tail and the cock's black from the eye to the bill, and his
+// red comb
+static void ptarmigan_pose(const Canvas &c, int f, bool winter) {
+  int head = f < 8 ? f % 2 : f == 9 || f == 11 ? 2 : 0;  // up, forward, down
+  const char *feet = f < 8 && f % 2 ? "..s.s" : "...ss";
+  if (winter) {
+    static const char *const HEAD[] = {"...wr|...wee", "....wr|....wee", "|||.....w|.....we"};
+    rows(c, "||.wwww|kwwwww|.swwws", "kws", {0x1A1A1A, 0xFFFFFF, 0xAAB6C8});
+    rows(c, feet, "s", {0xAAB6C8}, 0, 5);
+    rows(c, HEAD[head], "rwe", {0xB83030, 0xFFFFFF, 0x1A1A1A});
+  } else {
+    static const char *const HEAD[] = {"...mm|...mmk", "....mm|....mmk", "|||.....m|.....mk"};
+    rows(c, "||.nmnm|mnmnmn|.wwwww", "mnw", {0x8C7C64, 0x5C4A36, 0xF4F2EC});
+    rows(c, feet, "s", {0xF4F2EC}, 0, 5);
+    rows(c, HEAD[head], "mk", {0x8C7C64, 0x2A2018});
   }
-  for (const int8_t *p = HEAD[graze]; p < HEAD[graze] + (graze ? 9 : 12); p += 3)
-    for (int x = p[0]; x <= p[1]; x++)
-      c.put(x, p[2] + dy, B);
-  if (!graze)
-    dots(c, {22, 7, 23, 7, 18, 7, 18, 8, 18, 9}, B);
-  rows(c, "a.a.a.a|aaaaaaa|.aa.aa", "a", {B}, graze ? 15 : 14, graze ? 9 + dy : 0);
-  static const int8_t X[] = {5, 7, 14, 16},
-                      S[] = {1, -1, -1, 1, 1, 0, 0, 1, 0, 1, 1, 0, -1, 1, 1, -1, -1, 0, 0, -1, 0, -1, -1, 0};
-  for (int i = 0; i < 4; i++) {  // the legs, the far ones darker
-    int x = X[i], d = graze ? 0 : S[f * 4 + i];
-    line(c, x, 11, x + d, 19, x == 7 || x == 16 ? D : B);
-    c.put(x + d, 20, D);
+}
+// A red fox facing right, f 0 to 3 a trot and 4 standing. head: 0 ahead, 1 turned toward you, 2 and an ear flicked
+static void fox_pose(const Canvas &c, int f, int head) {
+  static const int8_t STEP[] = {1, -1, 1, -1, 0, 0, 0, 0, -1, 1, -1, 1, 0, 0, 0, 0};  // the feet from the hips
+  for (int i : {1, 2, 0, 3}) {  // near hind, far hind, far front, near front, the far ones first and darker
+    int x = i < 2 ? 5 + i : 9 + i, d = f < 4 ? STEP[f * 4 + i] : 0, up = (f == 1 && i % 2 == 0) || (f == 3 && i % 2);
+    line(c, x, 5, x + d, 7 - up, i == 1 || i == 2 ? 0x4A3226 : 0x2A1C16);
+  }
+  static const char *const LOOK[] = {"............k.k|...........oooo|..hhhhhhhhhooook|whhhoooooooowww|.hhhoooooooww",
+                                     "...........k..k|...........oooo|..hhhhhhhhhowwo|whhhoooooooowkw|.hhhoooooooww",
+                                     "...........k...k|...........oooo|..hhhhhhhhhowwo|whhhoooooooowkw|.hhhoooooooww"};
+  rows(c, LOOK[head], "ohwk", {0xD2642A, 0xEC8C46, 0xF2EEE6, 0x2A1C16});
+}
+// The roe buck's colours: its red coat, the white rump, the near legs and ears, the far legs, its nose and antlers
+static void roe(const Canvas &c, const char *art) {
+  rows(c, art, "rhswdka", {0xA8582C, 0xC4743E, 0x7A3E20, 0xF0ECE2, 0x5A3020, 0x1E1612, 0xB8A888});
+}
+// The bull moose, elg, facing right: the high hump over the shoulders and the back sloping down behind it, a long
+// heavy head with the overhanging muzzle and the bell under its throat, broad palmate antlers, long legs pale grey
+// below the knees. graze -1 walking, f its frame of MOOSE_MS; else the head down to the grass, 0 grazing, 1 chewing,
+// 2 an ear flicked back
+static void moose_pose(const Canvas &c, int f, int graze) {
+  static const char *const KEYS = "BHDkLMa";  // body, the light along its back, shade, hooves, legs, far legs, antlers
+  std::initializer_list<uint32_t> cols = {0x5A3C2A, 0x8A6446, 0x34221A, 0x1A100C, 0xB0A694, 0x847C6C, 0xB49A74};
+  // the foot from under the hip a frame each, the last one lifted and swung forward, and the knee with it
+  static const int8_t FOOT[] = {2, 1, 0, -1, -2, 0}, KNEE[] = {1, 0, 0, -1, -1, 0};
+  static const int8_t X[] = {5, 7, 12, 14}, PHASE[] = {0, 3, 1, 4};
+  for (int i : {1, 2, 0, 3}) {  // near hind, far hind, far front, near front, the far ones first and darker
+    int k = (f + PHASE[i]) % 6, d = graze < 0 ? FOOT[k] : 0, up = graze < 0 && k == 5;
+    int hind = i < 2, near = i == 0 || i == 3, x = X[i], jx = x - hind + (graze < 0 ? KNEE[k] : 0), jy = 16 - hind;
+    line(c, x, 12, jx, jy, near ? 0x5A3C2A : 0x34221A);  // the hind legs bend back at the hock
+    line(c, jx, jy + 1, x + d, 19 - 2 * up, near ? 0xB0A694 : 0x847C6C);
+    c.put(x + d, 20 - 2 * up, 0x1A100C);
+  }
+  if (graze < 0) {
+    rows(c,
+         "||||...........HH|.........HHBBH...H|......HHHBBBBBH.HHHH|....HHBBBBBBBBBBBBBBkHH|...HBBBBBBBBBBBBBBBBBBHH|"
+         "...BBBBBBBBBBBBBBDDBBBBB|...BBBBBBBBBBBBBD.DD.DkB|...DBBBBBBBBBBBD...D..D|....DD.....DDDD",
+         KEYS, cols);
+    rows(c,
+         "|...................a.a.a|..............a.a..aaaaa|..............aaaa.aaaa|...............aaaaaa|"
+         "..................a",
+         KEYS, cols);
+    return;
+  }
+  rows(c,
+       "||||...........HH|.........HHBBH|......HHHBBBBBH|....HHBBBBBBBBBB|...HBBBBBBBBBBBBB|...BBBBBBBBBBBBBBB|"
+       "...BBBBBBBBBBBBBBBB|...DBBBBBBBBBBBDBBB|....DD.....DDDD.DBB|.................DBBH|.................BkBH|"
+       ".................DBBH|..................BBH|..................BBBH|..................DBBH|"
+       "...................BkB",
+       KEYS, cols);
+  rows(c, graze == 1 ? "....................DB" : "...................DB", KEYS, cols, 0, 20);  // the jaw
+  rows(c,
+       "||||||||....................a.a|...................aaaaa|...................aaa.a|....................aaa|"
+       "....................a",
+       KEYS, cols);
+  c.put(graze == 2 ? 18 : 19, graze == 2 ? 11 : 12, 0x8A6446);  // its ear
+}
+// An Oslo city bus in Ruter's red, the front to the right, its wheels turning. By night its windows lit and its
+// headlights on, the rest as dark as the night
+static void bus_pose(const Canvas &c, int f, bool night) {
+  const uint32_t red = night ? 0x5A1E26 : 0xDD2222, dark = night ? 0x3E161C : 0xAA1A1A,
+                 skirt = night ? 0x111118 : 0x222222;
+  for (int x = 8; x <= 19; x++)  // the roof's cover
+    c.put(x, 0, dark);
+  for (int y = 1; y <= 6; y++)
+    for (int x = y == 1 ? 2 : 1; x <= (y == 1 ? 27 : 28); x++)
+      c.put(x, y, y == 6 ? dark : red);
+  for (int x = 1; x <= 28; x++)
+    c.put(x, 7, skirt);
+  for (int y = 2; y <= 6; y++)  // the front
+    c.put(29, y, y == 6 ? skirt : red);
+  // the windows, the doors, the windscreen and the sign over it
+  static const int8_t PANE[] = {2, 5, 7, 10, 15, 18, 20, 22};
+  for (int i = 0; i < 8; i += 2)
+    for (int x = PANE[i]; x <= PANE[i + 1]; x++)
+      for (int y = 2; y <= 4; y++)
+        c.put(x, y, night ? (x % 7 ? 0xFFCC77 : 0xEEBB66) : y == 2 ? 0x7799BB : 0x334455);
+  if (night)  // a few heads
+    dots(c, {3, 4, 9, 3, 9, 4, 16, 4, 21, 3, 21, 4}, 0x664433);
+  for (int x : {12, 13, 24, 25})
+    for (int y = 2; y <= 6; y++)
+      c.put(x, y, night ? (y < 5 ? 0xDDAA66 : 0x886644) : y == 2 ? 0x7799BB : 0x2A3A4A);
+  for (int x = 27; x <= 29; x++)
+    for (int y = 2; y <= 4; y++)
+      c.put(x, y, night ? 0x222233 : y == 2 ? 0x88AACC : 0x445566);
+  for (int x = 25; x <= 28; x++)
+    c.put(x, 1, 0x111111);
+  dots(c, {26, 1, 27, 1}, night ? 0xFFAA33 : 0xDD8822);
+  c.put(29, 5, night ? 0xFFFFDD : 0xDDDDCC);
+  c.put(1, 5, night ? 0xFF3333 : 0xAA2222);
+  static const int8_t SPOT[] = {1, 0, 2, 1, 1, 2, 0, 1};  // round the wheel the way it turns
+  for (int wx : {5, 20}) {
+    for (int x = wx - 1; x <= wx + 3; x++)  // the arch
+      c.put(x, 6, skirt);
+    for (int i = 0; i < 9; i++)
+      c.put(wx + i % 3, 7 + i / 3, i == 4 ? (night ? 0x555555 : 0x999999) : 0x161616);
+    c.put(wx + SPOT[f * 2], 7 + SPOT[f * 2 + 1], night ? 0x3A3A3A : 0x666666);
   }
 }
 
@@ -389,18 +543,18 @@ static Frames butterfly(uint32_t w, uint32_t d, uint32_t b, uint32_t u) {
   static const uint16_t SIT[] = {1300, 350, 1300, 350, 700};
   for (int i = 0; i < 5; i++)
     delays[24 + i] = SIT[i];
-  return {7, 6, delays, [w, d, b, u](int f, const Canvas &c) {
+  return {9, 6, delays, [w, d, b, u](int f, const Canvas &c) {
             // open, half, shut, then sitting shut, half, open
-            static const char *const LOOK[] = {"w.....w|wwb.bww|.ww.ww|..w.w",
-                                               "|.wb.bw|.ww.ww|..w.w",
-                                               "|...w|...w",
-                                               "|...u|...uw|...u",
-                                               "|..ubu|..uwu|...u",
-                                               "d.....d|wwb.bww|.ww.ww|..w.w"};
+            static const char *const LOOK[] = {"w.......w|wwwb.bwww|.www.www|..ww.ww",
+                                               "|..wb.bw|..ww.ww|...w.w",
+                                               "|....w|....w",
+                                               "|....u|....uw|....u",
+                                               "|...ubu|...uwu|....u",
+                                               "d.......d|wwwb.bwww|.www.www|..ww.ww"};
             int p = f < 24 ? (f % 4 == 3 ? 1 : f % 4) : "34543"[f - 24] - '0', bob = std::min(p, 2);
             rows(c, LOOK[p], "wdbu", {w, d, b, u}, 0, bob);
             for (int y = 1; y <= 3; y++)
-              c.put(3, y + bob, 0x443322);
+              c.put(4, y + bob, 0x443322);
           }};
 }
 
@@ -419,28 +573,38 @@ struct Fixed {
 };
 // ms each of their frames shows
 static constexpr uint16_t GULL_MS[] = {110, 110, 110, 110, 110, 110, 1700, 1300};
-static constexpr uint16_t GULLFAR_MS[] = {160, 160, 160, 160, 1600, 1100};
-static constexpr uint16_t GULLVISIT_MS[] = {240, 240, 240, 300,  400, 2600, 1300, 2200,
-                                            800, 700, 800, 1900, 350, 200,  200};
-static constexpr uint16_t EAGLE_MS[] = {1900, 1500, 1500, 1500, 260, 220, 260, 220};
+static constexpr uint16_t GULLVISIT_MS[] = {240,  240,  240,  300, 400, 2600, 1300, 2200, 800, 700, 800,
+                                            1900, 1100, 1500, 900, 600, 700,  1300, 350,  200, 200};
+// it soars, glides, soars again and beats once, deep
+static constexpr uint16_t EAGLE_MS[] = {2600, 1200, 2400, 200, 260, 160, 140, 160, 240, 160, 200};
 static constexpr uint16_t GEESE_MS[] = {240, 240, 240, 240};
 static constexpr uint16_t BOAT_MS[] = {1300, 800, 1300, 900};
 static constexpr uint16_t TACK_MS[] = {700, 700, 900, 700, 700};
 static constexpr uint16_t GLITTER_MS[] = {700, 110, 160, 110, 2400};
 static constexpr uint16_t EIDERS_MS[] = {700, 700, 700, 700, 700, 700, 700, 700, 700, 700, 500, 400, 2600, 600};
-static constexpr uint16_t SWEEP_MS[] = {1100, 450, 330, 260, 340, 260, 330, 450, 1000, 650, 3400, 650};
+// the lighthouse's beam each frame, in degrees from you, to the left below 0, and how long it points there: it turns
+// as fast all the way round, past you in short steps
+static constexpr int16_t SWEEP_DEG[] = {-90, -75, -65, -56, -48, -40, -33, -27,  -21,  -16,  -12,  -8,  -4,
+                                        0,   4,   8,   12,  16,  21,  27,  33,   40,   48,   56,   65,  75,
+                                        90,  105, 120, 135, 150, 165, 180, -165, -150, -135, -120, -105};
+static constexpr uint16_t SWEEP_MS[] = {300, 200, 180, 160, 160, 140, 120, 120, 100, 80,  80,  80,  80,
+                                        200, 80,  80,  80,  100, 120, 120, 140, 160, 160, 180, 200, 300,
+                                        300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300};
+static_assert(std::size(SWEEP_DEG) == std::size(SWEEP_MS), "an angle for each frame");
 static constexpr uint16_t SHIP_MS[] = {450, 380, 500, 420};
-static constexpr uint16_t TWINKLE_MS[] = {2900, 140, 190, 140, 4300, 120, 1700, 140, 3600};
-static constexpr uint16_t TWINKLE2_MS[] = {5100, 150, 210, 150, 2300, 130, 170, 130, 6900};
+// dark a while between sparkles and flickers, each dark a different while, so the stars started at each don't line up
+static constexpr uint16_t TWINKLE_MS[] = {2900, 140, 190, 140, 4300, 120, 1700, 140, 3600,
+                                          5100, 150, 210, 150, 2300, 130, 170,  130, 6900};
 static constexpr uint16_t SHOOTING_MS[] = {70, 70, 70, 70, 70, 70, 70};
 static constexpr uint16_t FLAG_MS[] = {380, 380, 380, 380, 380, 380};
 static constexpr uint16_t FIREWIN_MS[] = {170, 120, 240, 140, 200, 110, 260, 150};
 static constexpr uint16_t ADVENTSTAR_MS[] = {1500, 1300, 1500, 1300};
 static constexpr uint16_t CANDLES_MS[] = {1100, 160, 900, 200};
 static constexpr uint16_t MOOSE_MS[] = {300, 300, 300, 300, 300, 300};
-static constexpr uint16_t MOOSEGRAZE_MS[] = {1900, 700, 1500};
+// grazing, chewing, an ear flicked, chewing again
+static constexpr uint16_t MOOSEGRAZE_MS[] = {1900, 700, 1500, 300, 600, 1700, 500, 250, 600, 1200};
 static constexpr uint16_t REINDEER_MS[] = {500, 500, 500, 500, 500, 500, 1600, 900};
-static constexpr uint16_t SKIER_MS[] = {280, 280, 280, 280};
+static constexpr uint16_t SKIER_MS[] = {140, 140, 140, 140, 140, 140, 140, 140};
 static constexpr uint16_t SNOWDROP_MS[] = {500, 300, 160, 160, 200, 260, 320, 420, 40000};
 static constexpr uint16_t LEAF_MS[] = {375, 375, 375, 375, 375, 375, 375, 375, 5000};
 static constexpr uint16_t LEAFFALL_MS[] = {300, 300, 300, 300, 300, 300, 300, 300};
@@ -451,14 +615,16 @@ static constexpr uint16_t CITYSTAR_MS[] = {1000, 600, 800};
 static constexpr uint16_t SLEIGH_MS[] = {170, 170, 170, 170};
 static constexpr uint16_t ROCKET_MS[] = {70, 70, 70};
 static constexpr uint16_t CHICK_MS[] = {700, 160, 160, 500};
-static constexpr uint16_t HARE_MS[] = {150, 120, 150, 260};
-static constexpr uint16_t HARESIT_MS[] = {1400, 160, 900};
+// one round is one hop: crouched a long while, then off, stretched out and down
+static constexpr uint16_t HARE_MS[] = {1250, 150, 300, 550};
+// sitting up, an ear back, its nose going, then again
+static constexpr uint16_t HARESIT_MS[] = {1400, 160, 900, 700, 250, 1200, 800};
 static constexpr uint16_t PARADE_MS[] = {210, 210, 210, 210, 210, 210};
 static constexpr uint16_t BALLOON_MS[] = {700, 600, 700, 600};
-// the heart's last one fills up the rise and a step
-static constexpr uint16_t HEART_MS[] = {800, 900, 900, 450, 450, 900, 450, 900, 1800};
+// the heart's last two, fading, fill up the rise and a step
+static constexpr uint16_t HEART_MS[] = {800, 900, 900, 450, 450, 900, 450, 900, 900, 900};
 static constexpr uint16_t OWL_MS[] = {260, 260, 260, 260, 1500, 1200};
-static constexpr uint16_t OWLPERCH_MS[] = {2600, 900, 1800, 160, 2200, 700, 1400};
+static constexpr uint16_t OWLPERCH_MS[] = {2300, 700, 1600, 700, 400, 160, 1900, 700, 1200};
 static constexpr uint16_t PUMPKIN_MS[] = {160, 120, 220, 140, 180, 130};
 static constexpr uint16_t BEACON_MS[] = {1000, 1600};
 static constexpr uint16_t WINLIT_MS[] = {5200, 300, 3900, 260};
@@ -475,7 +641,90 @@ static constexpr uint16_t TROLL_MS[] = {380, 380};
 static constexpr uint16_t LONGSHIP_MS[] = {320, 320, 320, 320};
 // it sits, lifts its head and howls, twice, and is still at the end
 static constexpr uint16_t WOLF_MS[] = {1600, 300, 2400, 300, 1400, 300, 2800, 300, 900};
-static constexpr uint16_t WITCH_MS[] = {200, 200};
+static constexpr uint16_t WITCH_MS[] = {240, 200, 240, 200};
+
+// two hops first, which the show moves it on over, then it stands about
+static constexpr uint16_t MAGPIE_MS[] = {90,  130, 90,  130, 160, 1100, 700, 500, 220, 180,  220, 900,
+                                         160, 700, 800, 600, 220, 180,  220, 180, 220, 1000, 160, 900};
+static constexpr uint16_t CROWFLY_MS[] = {130, 110, 130, 110};
+// it lands with its wings up and folds them, looks about, caws three times, looks about, caws twice more, looks
+// about again and takes off
+static constexpr uint16_t CROW_MS[] = {260, 300,  260, 220,  1400, 900, 600, 280, 200, 280, 200, 320, 1200,
+                                       800, 1500, 700, 1100, 280,  200, 280, 900, 700, 700, 300, 180};
+// they sit and bob a while, then lift off together, wheel round and settle again
+static constexpr uint16_t PIGEONS_MS[] = {1400, 900, 1100, 700, 1300, 800, 1200, 600, 160, 160, 160,
+                                          160,  160, 160,  160, 160,  160, 160,  160, 160, 180, 220};
+// eight steps first, which the show moves it on over, then it stands and pecks
+static constexpr uint16_t PTARMIGAN_MS[] = {180, 180, 180, 180, 180, 180, 180, 180, 700, 220, 200, 220, 900, 600};
+// two quick beats, the wings through the frames between up and down, a glide, one beat and a glide
+static constexpr uint16_t SWALLOW_MS[] = {50, 50, 50, 50,  50, 50, 50, 50, 50, 50, 50, 50, 50,
+                                          50, 50, 50, 450, 50, 50, 50, 50, 50, 50, 50, 50, 300};
+// as the golden eagle, but slower
+static constexpr uint16_t SEAEAGLE_MS[] = {2200, 900, 1800, 300, 300, 180, 160, 180, 320, 200, 300};
+// the glide down as long as the show takes to bring it down to the water, the last as long as it takes it away
+static constexpr uint16_t SEAEAGLECATCH_MS[] = {3400, 300, 250, 350, 260, 260, 280, 300, 3800};
+// a bound: gathered, off, stretched out, landing on its front feet
+static constexpr uint16_t SQUIRREL_MS[] = {110, 90, 120, 100};
+// nibbling, the nut lowered, a look about, a flick of the tail, and again
+static constexpr uint16_t SQUIRRELNUT_MS[] = {160, 140, 160, 140, 160, 140, 160, 500, 900, 800, 250,
+                                              600, 160, 140, 160, 140, 160, 700, 900, 800, 250, 600};
+// a trot, the diagonal legs together
+static constexpr uint16_t FOX_MS[] = {150, 130, 150, 130};
+// it stops, turns its head to look at you a while, flicks an ear, looks ahead, at you again, flicks its ear twice,
+// and looks ahead again
+static constexpr uint16_t FOXLOOK_MS[] = {600, 1800, 200, 1400, 900, 1200, 200, 300, 200, 800, 500};
+
+// grazing, a tug at the grass, then the head up a while, the ears twitching, then grazing a little more and up
+static constexpr uint16_t ROEDEER_MS[] = {1800, 500, 1300, 400, 1600, 180, 1000, 150, 800, 1400, 600, 1100, 160, 900};
+// a bound: gathered, off its hind feet, in the air, landing on its front feet
+static constexpr uint16_t ROEDEERRUN_MS[] = {120, 110, 150, 120};
+
+// each lifting its head from the grass and putting it down again in its own time, one at a time
+static constexpr uint16_t SHEEP_MS[] = {1400, 900, 1000, 800, 1100, 900, 300, 400};
+// three strides of its walk, then it stops, looks at you, behind it, at you again and ahead
+static constexpr uint16_t LYNX_MS[] = {220, 220, 220, 220, 220,  220,  220, 220, 220,
+                                       220, 220, 220, 500, 1500, 1200, 700, 400};
+// under a while, a roll, a breath under, a second roll
+static constexpr uint16_t PORPOISE_MS[] = {2600, 120, 130, 170, 150, 130, 280, 300,
+                                           1400, 120, 130, 170, 150, 130, 280, 400};
+// calm, the bull blows, surfaces and goes under, then the cow, then her flukes come up and slap down
+static constexpr uint16_t ORCAS_MS[] = {1800, 400, 350, 700, 300, 300, 400, 350,
+                                        600,  300, 700, 250, 300, 200, 250, 400};
+
+// two kicks, each a step forward, the push back and the leg out behind, then gliding on both runners
+static constexpr uint16_t KICKSLED_MS[] = {180, 150, 230, 180, 150, 230, 900};
+// the snow spraying off the runners, then a bump: up off it and down again in a burst of snow
+static constexpr uint16_t SLEDGE_MS[] = {140, 140, 140, 120, 160};
+static constexpr uint16_t CYCLIST_MS[] = {170, 170, 170, 170};
+// a stride and a step, the stick planted ahead with the first
+static constexpr uint16_t HIKER_MS[] = {120, 120, 120, 120, 120, 120, 120, 120};
+// two strides and steps, stopping by a chanterelle, bending down to it, picking it, straightening up with it and
+// standing a while
+static constexpr uint16_t MUSHROOMER_MS[] = {120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
+                                             120, 120, 120, 120, 120, 700, 300, 900, 300, 1100};
+// a round is one jump: in flight wobbling a little, touching down, in a telemark, then riding out upright
+static constexpr uint16_t SKIJUMPER_MS[] = {500, 450, 500, 450, 500, 450, 500, 450, 160, 1400, 1800};
+static constexpr uint16_t BUS_MS[] = {240, 240, 240, 240};
+static constexpr uint16_t PLOUGH_MS[] = {170, 150, 170, 160};
+// a stride and a step, pushing
+static constexpr uint16_t MOWER_MS[] = {100, 100, 100, 100, 100, 100, 100, 100};
+static constexpr uint16_t PLANE_MS[] = {950, 120, 400, 70, 90, 70};
+// a long while a faint dot, then it flares and fades
+static constexpr uint16_t SATELLITE_MS[] = {60000, 700, 500, 400, 600, 900};
+// a gull beats now and then, and the last four the swell lifts the bow
+static constexpr uint16_t SJARK_MS[] = {1400, 200, 200, 200, 1600, 200, 200, 200, 1400, 200, 200, 200, 900};
+
+// firewin's flicker three times over, the cat doing something now and then
+static constexpr uint16_t FIREWINCAT_MS[] = {170, 120, 240, 140, 200, 110, 260, 150, 180, 130, 250, 140,
+                                             190, 120, 240, 160, 170, 120, 230, 150, 200, 110, 250, 140};
+// she stands a while, turns, and walks off; played once, the show moving her from the turn on
+static constexpr uint16_t HULDRA_MS[] = {2200, 900, 1800, 500, 340, 340, 340, 340,
+                                         340,  340, 340,  340, 340, 340, 340, 340};
+// played once: in on short steps, a stop to hold up the lantern and look back and ahead, then on again
+static constexpr uint16_t NISSE_MS[] = {300,  300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 700, 1400, 1300,
+                                        1000, 500, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300};
+// two strokes, a wave lifting it and letting it down
+static constexpr uint16_t DRAUGEN_MS[] = {320, 420, 300, 520, 320, 420, 300, 520};
 
 // Frame f's digit in seq, which has a digit for each frame in MS
 template<const auto &MS, size_t N> constexpr int pose(const char (&seq)[N], int f) {
@@ -485,85 +734,114 @@ template<const auto &MS, size_t N> constexpr int pose(const char (&seq)[N], int 
 
 static constexpr Fixed FIXED[] = {
     // ---- birds
-    // A gull from the front, wings first: an M while it glides, up and down through a V while it beats
-    {"gull", 13, 7, GULL_MS, [](int f, const Canvas &c) { gull_pose(c, pose<GULL_MS>("01454123", f), 0, 0); }},
-    // the same gull far off, a small v that beats now and then
-    {"gullfar", 5, 3, GULLFAR_MS,
+    // A herring gull from the side, flying the way it faces: a few beats, then a long glide
+    {"gull", 19, 13, GULL_MS,
      [](int f, const Canvas &c) {
-       static const char *const LOOK[] = {"x...x|.x.x|..x", "|xx.xx|..x", "|.xxx|x...x",
-                                          "|xx.xx|..x",     "|xx.xx|..x", "x...x|.xxx"};
-       rows(c, LOOK[f], "x", {0x777788});
+       gull_flying(c, pose<GULL_MS>("01234256", f), 0, 0);
+       outline(c, GULL_RIM);
      }},
     // A gull's visit to the ridge: it comes in gliding, flares with its legs down, lands with its wings up, folds
-    // them, looks about and preens, then crouches and takes off
-    {"gullvisit", 15, 15, GULLVISIT_MS,
+    // them, looks back, calls with its head thrown back and preens, looks back and preens again and calls, then
+    // crouches and takes off
+    {"gullvisit", 21, 15, GULLVISIT_MS,
      [](int f, const Canvas &c) {
-       static const char *const SIT[] = {"......w|.....wwwy|..gggww|.kgggwww|..gggwww|...wwww|....l.l",
-                                         "......w|....ywww|..gggww|.kgggwww|..gggwww|...wwww|....l.l",
-                                         "||..gggwwy|.kgggwww|..gggwww|...wwww|....l.l",
-                                         "||..ggwwwy|.kgggwww|..gggwww|...wwww|....l.l"};
-       if (f >= 3 && f <= 12)
-         rows(c, SIT[f == 6 ? 1 : f == 8 ? 2 : f == 10 ? 3 : 0], "wgkyl",
-              {0xFFFFFF, 0x9999AA, 0x333344, 0xFFBB33, 0xEE9988}, 4, 8);
-       if (f == 0)
-         gull_pose(c, 2, 1, 0);
-       if (f == 1) {
-         gull_pose(c, 1, 1, 2);
-         dots(c, {6, 7, 8, 7}, 0xEE9988);
+       const int n = (int) std::size(GULLVISIT_MS);
+       if (f >= 3 && f <= n - 4) {  // standing, its feet on the bottom row
+         // ahead, looking back, calling, preening
+         static const char *const HEAD[] = {
+             "||||.............www|............wwwkw|............wwwwwyy",
+             "||||............www|...........kwww|.........yywwww",
+             "|..............y.y|.............wyy|............wwkr|............www|............www|............www",
+             "||||||..........www|.........yywwww"};
+         gull_rows(c, "|||||||............www|......GGGGGGwwww|....kkGGGGGGGwww|...kk.wGGGGGwwww|.......wwwwwwww|"
+                      ".........ggggg|..........l.l|..........l.l");
+         gull_rows(c, HEAD[pose<GULLVISIT_MS>("000000102030103020000", f)]);
+         if (f == 3)  // its wings still up, folding
+           gull_rows(c, "|||.....kG|.....kGGg|......GGGg|.......GGg|........G");
+         if (f == 4)
+           gull_rows(c, "||||||...kkGGGGg|.....GGGGGg");
+       } else if (f == n - 3) {  // crouched to take off
+         gull_rows(c, "||||||||.............www|............wwwkw|......GGGGGGwwwwyy|....kkGGGGGGGwww|...kk.wwwwwwwww|"
+                      ".........ggggg|..........l.l");
+       } else {  // gliding in, flaring, landing, taking off and its first beat: its wings and how high
+         static const int8_t FLY[] = {6, 0, 1, 2, 0, 3, 0, 3, 2, 4};
+         int i = f <= 2 ? f : f - (n - 5);
+         gull_flying(c, FLY[i * 2], 1, FLY[i * 2 + 1]);
+         if (f == 1 || f == 2)  // its legs down
+           gull_rows(c, f == 1 ? "|||||||||||||.........l.l" : "|||||||||||||..........l.l|..........l.l");
        }
-       if (f == 2) {
-         gull_pose(c, 0, 1, 4);
-         dots(c, {6, 9, 8, 9, 6, 10, 8, 10}, 0xEE9988);
-       }
-       if (f == 3) {
-         dots(c, {6, 8, 5, 7, 4, 6, 3, 5, 10, 8, 11, 7, 12, 6}, 0xBBBBCC);
-         dots(c, {3, 5, 12, 6}, 0x333344);
-       }
-       if (f == 4)
-         dots(c, {6, 9, 5, 8, 4, 8, 11, 8}, 0xBBBBCC);
-       if (f == 12)
-         dots(c, {4, 10, 3, 9, 12, 10}, 0x9999AA);
-       if (f == 13) {
-         gull_pose(c, 0, 1, 5);
-         dots(c, {6, 9, 8, 9}, 0xEE9988);
-       }
-       if (f == 14)
-         gull_pose(c, 4, 1, 4);
+       outline(c, GULL_RIM);
      }},
-    // A golden eagle from below: a long plank with the fingers spread at its tips, a small golden head and a short
-    // fanned tail. It soars, banks one way and the other, and beats a few times
-    {"eagle", 27, 11, EAGLE_MS,
+    // A golden eagle from the side flying right: it soars with its wings a little raised, glides with them level,
+    // soars again and beats once, deep
+    {"eagle", 24, 18, EAGLE_MS,
      [](int f, const Canvas &c) {
-       int bank = pose<EAGLE_MS>("12101111", f) - 1, flap = pose<EAGLE_MS>("11110121", f) - 1, m = 13;
-       auto lift = [&](int x) {
-         float d = abs(x - m) / 11.0f;
-         return iround(bank * (m - x) / 8.0f + flap * 2.8f * d * sqrtf(d));
-       };
-       for (int x = 3; x <= 23; x++) {
-         int d = abs(x - m), deep = d <= 3 ? 4 : d <= 7 ? 3 : 2, y = 4 + lift(x);
-         c.put(x, y, d < 8 ? 0x665544 : 0x554433);
-         for (int k = 1; k < deep; k++)
-           c.put(x, y + k, k == deep - 1 ? 0x221111 : 0x332211);
-       }
-       static const int8_t FINGER[] = {1, -1, 2, 0, 1, 1, 3, 1, 2, 2};
-       for (int s = -1; s <= 1; s += 2) {
-         int tx = m + s * 10, ty = 4 + lift(tx);
-         for (int i = 0; i < 10; i += 2)
-           c.put(tx + s * FINGER[i], ty + FINGER[i + 1], FINGER[i + 1] == 2 ? 0x221111 : 0x332211);
-       }
-       c.put(m, 2, 0xAA8833);
-       c.put(m, 3, 0xBB9944);
-       dots(c, {12, 3, 14, 3}, 0x665544);
-       dots(c, {12, 8, 13, 8, 14, 8}, 0x443322);  // the tail
-       dots(c, {11, 9, 12, 9, 13, 9, 14, 9, 15, 9}, 0x221111);
+       eagle_body(c, false);
+       eagle_wing(c, pose<EAGLE_MS>("52510123432", f), false);
      }},
-    // A V of geese far off, each bird beating in its own time, small and grey with the haze
-    {"geese", 17, 12, GEESE_MS,
+    // A V of geese flying right, each bird beating in its own time, grey with the haze
+    {"geese", 27, 18, GEESE_MS,
      [](int f, const Canvas &c) {
-       static const char *const S[] = {"x.x|.x", "|xxx", ".x|x.x", "|xxx"};
-       static const int8_t AT[] = {14, 4, 10, 2, 6, 0, 10, 6, 6, 8, 2, 10};
+       static const char *const S[] = {"x...x|.x.x|..x", "|xx.xx|..x", "|.xxx|x...x", "|xx.xx|..x"};
+       static const int8_t AT[] = {21, 6, 15, 3, 9, 0, 15, 9, 9, 12, 3, 15};
        for (int i = 0; i < 6; i++)
          rows(c, S[(f + i) % 4], "x", {0x555566}, AT[i * 2], AT[i * 2 + 1]);
+     }},
+    // A magpie facing right, out in front of the cabin: two hops, then it stands, looks back over its shoulder, pecks
+    // twice and flicks its long tail up, looks back again, pecks three times and flicks its tail. Black with a white
+    // shoulder and belly, a blue gloss on its wing and a green one on its tail
+    {"magpie", 10, 7, MAGPIE_MS,
+     [](int f, const Canvas &c) {
+       // stand, look back, peck, tail up, crouch, in the air
+       static const char *const LOOK[] = {".......kk|......kkkk|gg..kwwkk|.ggkbbbwk|...kbbwww|.....k.k",
+                                          ".......kk|.....kkkk|gg..kwwkk|.ggkbbbwk|...kbbwww|.....k.k",
+                                          "g|.g|..gkwwk|...kbbwkk|....kbwwkk|.....k.k.k",
+                                          "g|.g.....kk|..g...kkkk|...kwwkk|...kbbbwk|....kbbww|.....k.k",
+                                          "||.......kk|gg...wkkkk|.ggkbbbwk|...kbbwww",
+                                          ".......kk|......kkkk|gg..kwwkk|.ggkbbbwk|...kbbwww|...k.k"};
+       int p = pose<MAGPIE_MS>("454500102020301020202030", f);
+       rows(c, LOOK[p], "kbgw", {0x15171D, 0x2F4F8F, 0x2F6F5A, 0xF2F4F6}, 0, p == 3 || p == 5 ? 0 : 1);
+     }},
+    // A hooded crow flying right, rowing steadily, the fingers of its wings spread on the downstroke
+    {"crowfly", 11, 8, CROWFLY_MS,
+     [](int f, const Canvas &c) { crow_flying(c, pose<CROWFLY_MS>("0121", f), 0, 0, false); }},
+    // A hooded crow's visit to the ridge: it comes in with its legs down, lands with its wings up and folds them,
+    // looks about, caws three times, bobbing forward with its bill open and its tail up, and takes off
+    {"crow", 11, 9, CROW_MS,
+     [](int f, const Canvas &c) {
+       // stand, look back, caw, crouch
+       static const char *const SIT[] = {"......kk|.....kkkkk|...gggkkk|.ggggkkgg|.kkkkkggg|kkkkkdgg|k....k.k",
+                                         ".....kk|...kkkkk|...gggkk|.ggggkkgg|.kkkkkggg|kkkkkdgg|k....k.k",
+                                         "|.......kk.k|...ggkkkk|..ggggkkkk|.kkkkkgg.k|kkkkkdgg|k....k.k",
+                                         "|......kk|.....kkkkk|.gggggkkk|kggggkkgg|.kkkkdggg|.....k.k"};
+       std::initializer_list<uint32_t> cols = {0x16161C, 0xA4A6AC, 0x7C7E86};
+       int p = pose<CROW_MS>("0000010202020101020201030", f), last = (int) std::size(CROW_MS) - 1;
+       if (f == 0 || f == last)  // coming in, legs down, and taking off on a downstroke
+         crow_flying(c, f ? 2 : 0, 0, f ? 1 : 0, !f);
+       else
+         rows(c, SIT[p], "kgd", cols, 0, f == 1 ? 1 : 2);
+       if (f >= 1 && f <= 3)  // its wings up as it lands, then folding
+         rows(c, f < 3 ? "k.k|.kkk|..kkk|...kk" : "||..kk|...kk", "k", cols);
+     }},
+    // A rock ptarmigan in summer and in winter: eight steps, its head going with each, then it stands and pecks twice
+    {"ptarmigan", 7, 6, PTARMIGAN_MS, [](int f, const Canvas &c) { ptarmigan_pose(c, f, false); }},
+    {"ptarmiganw", 7, 6, PTARMIGAN_MS, [](int f, const Canvas &c) { ptarmigan_pose(c, f, true); }},
+    // A barn swallow flying right, from the side: steel blue, its face rusty red, its belly cream and its tail
+    // forked. Quick beats and short glides. The show sends two of them along curves low over the meadow
+    {"swallow", 13, 7, SWALLOW_MS,
+     [](int f, const Canvas &c) {
+       // up, half up, level toward you, half down, down, swept back to glide
+       static const char *const WING[] = {".....k|......kk|........kk", "|.....kk|.......kkk", "|||........kk",
+                                          "||||........k|......kk",     "||||........k|.......kk|.....kk",
+                                          "||..kkkkkkk"};
+       rows(c, "||k|.kkkkbbbbbbb|..kkkkwwwwkrk|.k", "kbwr", {0x1C2850, 0x3A5CA8, 0xF2E8D8, 0xC0502E});
+       rows(c, WING[pose<SWALLOW_MS>("01234321012343215012343215", f)], "k", {0x1C2850});
+     }},
+    // A white-tailed sea eagle from the side flying right, as the golden eagle flies but slower
+    {"seaeagle", 24, 18, SEAEAGLE_MS,
+     [](int f, const Canvas &c) {
+       eagle_body(c, true);
+       eagle_wing(c, pose<SEAEAGLE_MS>("52510123432", f), true);
      }},
     // ---- the sea
     // A small sailboat, bow to the left: the jib and the main fill and luff, the hull rocks
@@ -622,34 +900,36 @@ static constexpr Fixed FIXED[] = {
        if (f == 11 || f == 12)
          dots(c, {0, 4, 5, 4}, 0x99BBDD);
      }},
-    // The lighthouse turning, one sweep in 12 frames: the beam points left, shortens as it turns toward you, the
-    // lamp flashes, then the beam grows on the right and dims as it turns away
+    // The lighthouse turning, round in SWEEP_DEG's steps: the beam points left, shortens as it turns toward you, the
+    // lamp flashes, then the beam grows on the right, and dimmer it swings round behind and back to the left. The lamp
+    // never goes out
     {"sweep", 141, 11, SWEEP_MS,
      [](int f, const Canvas &c) {
        const int L = 90, ly = 5;  // the lamp in the sprite
-       static const uint8_t LEN[] = {90, 58, 32, 14, 0, 14, 32, 48, 50, 38, 0, 48},
-                            BRIGHT[] = {20, 20, 21, 23, 0, 23, 21, 20, 19, 11, 0, 10};  // in twentieths
-       int dir = pose<SWEEP_MS>("000012222210", f) - 1;
-       for (int d = 2; dir && d <= LEN[f]; d++) {
-         float half = 0.6f + d * 0.06f, fade = (float) d / LEN[f];
+       int deg = SWEEP_DEG[f], dir = deg < 0 ? -1 : 1;
+       float a = deg * (float) M_PI / 180, away = std::max(0.0f, fabsf((float) deg) - 90);  // past side on
+       // as long as it's across you, a little brighter toward you and half as bright pointing away, in twentieths
+       float len = 90 * fabsf(sinf(a)), bright = 20 + 3 * std::clamp((cosf(a) - 0.9f) * 10, 0.0f, 1.0f) - away / 9;
+       for (int d = 2; d <= std::min(len, dir < 0 ? 90.0f : 50.0f); d++) {
+         float half = 0.6f + d * 0.06f, fade = d / len;
          for (int y = (int) floorf(ly - half); y <= (int) ceilf(ly + half); y++) {
-           float off = abs(y - ly) / (half + 0.5f), v = BRIGHT[f] / 20.0f * (1 - 0.75f * fade) * (1 - 0.6f * off);
+           float off = abs(y - ly) / (half + 0.5f), v = bright / 20 * (1 - 0.75f * fade) * (1 - 0.6f * off);
            if (off <= 1 && v > 0.18f)
              c.put(L + dir * d, y, v > 0.72f ? 0xFFFFEE : v > 0.5f ? 0xDDDDEE : v > 0.32f ? 0x9999AA : 0x555577);
          }
        }
-       int r = f == 4 ? 11 : f == 3 || f == 5 ? 5 : 0;  // the glow's radius in half px
+       int r = (int) lroundf(std::max(0.0f, 11 * (1 - abs(deg) / 24.0f)));  // the glow's radius in half px
        for (int y = 0; r && y < 11; y++)
          for (int x = L - 7; x <= L + 7; x++) {
            int d2 = 4 * ((x - L) * (x - L) + (y - ly) * (y - ly));
            if (d2 < r * r)
              c.put(x, y, d2 * 25 < r * r * 4 ? 0xFFFFFF : d2 * 100 < r * r * 49 ? 0xFFFFEE : 0x9999AA);
          }
-       uint32_t lamp = f == 10 ? 0x886633 : f == 4 ? 0xFFFFFF : 0xFFDD88;
+       bool flash = r >= 9;
        for (int y = ly - 1; y <= ly + 1; y++)
          for (int x = L - 1; x <= L + 1; x++)
-           if (f != 4 || (x != L && y != ly))
-             c.put(x, y, x == L && y == ly && f != 10 ? 0xFFFFEE : lamp);
+           if (!flash || (x != L && y != ly))
+             c.put(x, y, x == L && y == ly ? 0xFFFFEE : flash ? 0xFFFFFF : 0xFFDD88);
      }},
     // A coastal express far out on the horizon at night: rows of warm windows, a white light at the masthead, a
     // red one to port, and their reflections trembling on the water
@@ -674,10 +954,59 @@ static constexpr Fixed FIXED[] = {
              c.put(x + r.in(0, 1), y, y == 6 ? 0xAA8855 : 0x665533);
        c.put(9 + f % 2, 7, 0xAAAABB);
      }},
+    // A harbour porpoise heading right, rolling out of the sea twice and under again: its head, its dark back
+    // arching up with the small fin on top, the tail stock last, and rings. The water at row 3
+    {"porpoise", 9, 4, PORPOISE_MS,
+     [](int f, const Canvas &c) {
+       static const char *const LOOK[] = {"",
+                                          "||......dh|.....w..w",
+                                          "|......d|....dddh|...r....r",
+                                          "....d|...dddh|..dddddd|.r......r",
+                                          "...d|..ddd|.ddddd|r.......r",
+                                          "|.d|ddd|r.r....r",
+                                          "||dd|.r....r",
+                                          "|||r......r"};
+       rows(c, LOOK[pose<PORPOISE_MS>("0123456701234567", f)], "dhwr", {0x3A4250, 0x6E7888, 0xE6EEF8, 0x8FAAD4});
+     }},
+    // A sjark, a small fishing boat, the bow to the right: white with a red stripe, its wheelhouse aft and the mast
+    // forward, the swell lifting its bow now and then. A few gulls follow it, far off specks
+    {"sjark", 24, 9, SJARK_MS,
+     [](int f, const Canvas &c) {
+       const uint32_t white = 0xF0F0F0;
+       const int o = 9;  // the stern's column
+       bool lift = f >= 9;
+       // the hull: white, a red stripe under the gunwale, its sheer rising to the bow
+       static const int8_t TOP[] = {4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 3, 3},
+                           BOT[] = {6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 5};
+       for (int x = 0; x <= 14; x++)
+         for (int y = TOP[x]; y <= BOT[x]; y++)
+           c.put(o + x, y - (lift && x >= 12), y == TOP[x] + 1 ? 0xCC2233 : white);
+       for (int x = 2; x <= 5; x++) {  // the wheelhouse
+         c.put(o + x, 2, 0x556677);
+         c.put(o + x, 3, x == 3 || x == 5 ? 0x334455 : white);
+         c.put(o + x, 4, white);
+       }
+       for (int y = 0; y <= 4; y++)  // the mast
+         c.put(o + 10, y, 0x6A5A48);
+       // foam at the bow, unless it's lifted out, and a short wake
+       if (!lift)
+         dots(c, {(int8_t) (o + 13), 8, (int8_t) (o + 14), 8}, white);
+       c.put(o, 8, white);
+       Rng r = seeded((uint32_t) (60 + f % 3));
+       for (int x = o - 6; x < o; x++)
+         if (r.in(0, 9) < 3)
+           c.put(x, 8, 0xC8D8EC);
+       // the gulls, wings up or arched
+       static const char *const GULL[] = {"x.x|.x", ".x|x.x"};
+       static const char *const BEAT[] = {"1010111111111", "1111101011111", "1111111110101"};
+       static const int8_t AT[] = {4, 0, 0, 2, 3, 5};
+       for (int g = 0; g < 3; g++)
+         rows(c, GULL[BEAT[g][f] - '0'], "x", {0xDDDDE6}, AT[g * 2], AT[g * 2 + 1]);
+     }},
     // ---- the sky
-    // A star sparkling now and then, in irregular times. Two of these with different times
-    {"twinkle", 5, 5, TWINKLE_MS, [](int f, const Canvas &c) { sparkle(c, pose<TWINKLE_MS>("012101010", f)); }},
-    {"twinkle2", 5, 5, TWINKLE2_MS, [](int f, const Canvas &c) { sparkle(c, pose<TWINKLE2_MS>("012101210", f)); }},
+    // A star sparkling now and then, at irregular times
+    {"twinkle", 5, 5, TWINKLE_MS,
+     [](int f, const Canvas &c) { sparkle(c, pose<TWINKLE_MS>("012101010012101210", f)); }},
     {"shooting", 24, 8, SHOOTING_MS,
      [](int f, const Canvas &c) {
        int head = std::min(23, 5 + f * 16 / 5);
@@ -690,6 +1019,31 @@ static constexpr Fixed FIXED[] = {
                : t < 75 ? 0x8888CC
                         : 0x444466);
        }
+     }},
+    // A plane's lights high up on its way in to land, the front to the right: red and green at its wingtips, white
+    // at its tail, its landing light ahead, the red beacon blinking and the white strobes flashing twice. Its body
+    // only just shows. Drawn in the lights' own colours
+    {"plane", 9, 5, PLANE_MS,
+     [](int f, const Canvas &c) {
+       for (int x = 1; x <= 6; x++)
+         c.put(x, 2, 0x3A4054);
+       dots(c, {1, 1, 4, 3, 5, 1}, 0x3A4054);
+       bool strobe = f == 3 || f == 5;
+       c.put(3, 4, strobe ? 0xFFFFFF : 0xFF3333);
+       c.put(4, 0, strobe ? 0xFFFFFF : 0x33FF66);
+       c.put(0, 2, 0xCCCCDD);
+       c.put(7, 2, 0xFFFFDD);
+       c.put(8, 2, 0xFFFFFF);
+       if (f == 1)
+         c.put(5, 3, 0xFF2222);
+     }},
+    // A satellite crossing the starry sky, a faint dot a long while, then it flares up and fades again
+    {"satellite", 3, 3, SATELLITE_MS,
+     [](int f, const Canvas &c) {
+       static const uint32_t COL[] = {0x8888AA, 0xAAAACC, 0xDDDDEE, 0xFFFFFF, 0xDDDDEE, 0xAAAACC};
+       c.put(1, 1, COL[f]);
+       if (f == 3)
+         dots(c, {0, 1, 2, 1, 1, 0, 1, 2}, 0x8888AA);
      }},
     // ---- home
     // The flag at half the scene's size, flying to the left in a light wind: its fly end droops and folds roll
@@ -720,13 +1074,35 @@ static constexpr Fixed FIXED[] = {
            if (x != 3)
              c.put(x, y, COL[std::min(4, lv + (y > 2) + ((x < 3) == (side != 0)))]);
      }},
-    // a paper advent star hanging in the window, turning slowly on its cord, its light on the glass
-    {"adventstar", 7, 6, ADVENTSTAR_MS,
+    // The cabin's window with the cat sitting on the sill, black against the firelight, which flickers like
+    // firewin's: it flicks its tail, looks one way and the other and licks a paw. The show swaps it for firewin when
+    // it's jumped down
+    {"firewincat", 7, 6, FIREWINCAT_MS,
      [](int f, const Canvas &c) {
-       c.put(3, 0, 0x665544);
-       rows(c, f % 2 ? "...y|.yywyy|..ywy|.yyyyy|..y.y" : "...y|..ywy|.yywyy|..yyy|.y...y", "yw",
-            {f == 2 ? 0xFFDD77u : 0xFFCC66u, 0xFFFFEE}, 0, 1);
-       dots(c, {0, 3, 6, 3, 0, 5, 6, 5}, 0x776644);
+       static const uint32_t COL[] = {0xDD9944, 0xFFBB55, 0xFFCC66, 0xFFDD88, 0xFFEE99};
+       // it sits, its tail up, it looks left and right, and it licks its paw
+       static const char *const CAT[] = {".k.k|.kkk|.kkkk", ".k.k|.kkkk|.kkk", ".kk|kkkk|.kkkk",
+                                         "..kk|.kkk|.kkkk", "|.k.k|.kkkk",     "|k.k|kkkkk"};
+       int lv = pose<FIREWINCAT_MS>("213120321320213121302312", f);
+       int side = pose<FIREWINCAT_MS>("010010101001010001010010", f);
+       for (int y = 0; y < 6; y++)
+         for (int x = 0; y != 2 && x < 7; x++)
+           if (x != 3)
+             c.put(x, y, COL[std::min(4, lv + (y > 2) + ((x < 3) == (side != 0)))]);
+       rows(c, CAT[pose<FIREWINCAT_MS>("001010222003300454540100", f)], "k", {0x2A1E1E}, 0, 3);
+     }},
+    // A paper advent star in the window, nearly as big as it, lit from inside, its light warm on the glass round it.
+    // It turns slowly on its cord, one side then the other in shade. A column wider than the glass, left empty, so
+    // the panel's padding to an even width doesn't cover the window's frame.
+    {"adventstar", 8, 6, ADVENTSTAR_MS,
+     [](int f, const Canvas &c) {
+       for (int y = 0; y < 6; y++)
+         for (int x = 0; x < 7; x++)
+           if (x != 3 && y != 2)
+             c.put(x, y, abs(x - 3) + abs(2 * y - 5) / 2 <= 3 ? 0x9C6230 : 0x6A4424);
+       rows(c, "...t|..aaa|taacaat|.aacaa|..a.a|.t...t", "tac", {0xF0A040, 0xFFD050, 0xFFEC8C});
+       if (f % 2)  // the side turned away
+         rows(c, f == 1 ? "|..s|sss|.ss|..s|.s" : "|....s|....sss|....ss|....s|.....s", "s", {0xC07830});
      }},
     // seven candles in an arch standing in the window, one of them flickering a little
     {"candles", 7, 5, CANDLES_MS,
@@ -738,57 +1114,258 @@ static constexpr Fixed FIXED[] = {
          c.put(3, 0, 0xFFFFFF);
      }},
     // ---- animals and people
-    // A moose as a silhouette in the forest's colour
-    {"moose", 24, 21, MOOSE_MS, [](int f, const Canvas &c) { moose_pose(c, f, false); }},
-    {"moosegraze", 24, 21, MOOSEGRAZE_MS, [](int f, const Canvas &c) { moose_pose(c, f, true); }},
-    // A reindeer ambling as it grazes, head down, now and then looking up
+    // A bull moose walking along the meadow, and grazing there
+    {"moose", 24, 21, MOOSE_MS, [](int f, const Canvas &c) { moose_pose(c, f, -1); }},
+    {"moosegraze", 24, 21, MOOSEGRAZE_MS,
+     [](int f, const Canvas &c) { moose_pose(c, 0, pose<MOOSEGRAZE_MS>("0102101210", f)); }},
+    // A reindeer grazing its way along, grey-brown with a pale neck and mane, a white rump and tail, a darker face, big
+    // antlers swept back with a brow tine forward, short sturdy legs: head down a few steps, then up to look about
     {"reindeer", 15, 12, REINDEER_MS,
      [](int f, const Canvas &c) {
-       static const int8_t STEP[] = {1, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1, 0, 0, 0, 0};
-       for (int x = 3; x <= 11; x++)
-         for (int y = 4 + (x == 3 || x == 11); y <= 8; y++)
-           c.put(x, y, y == 8 ? 0x666655 : 0x888877);
-       dots(c, {3, 5, 2, 6}, 0xDDDDDD);
-       if (f == 6) {  // looking up
-         for (int y = 2; y <= 6; y++) {
-           c.put(11, y, 0xCCCCCC);
-           c.put(12, y, y > 3 ? 0xCCCCCC : 0x777766);
+       static const int8_t X[] = {3, 5, 9, 11}, STEP[] = {1, 0, 0, 1, 0, 1, 1, 0, -1, 0, 0, -1, 0, -1, -1, 0,
+                                                          1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0,  0, 0,  0,  0};
+       for (int i : {1, 2, 0, 3})  // near hind, far hind, far front, near front, the far ones first and darker
+         line(c, X[i], 9, X[i] + STEP[f * 4 + i], 11, i == 0 || i == 3 ? 0x4A3C30 : 0x5C4E40);
+       rows(c,
+            f == 6 ? "........a.a|.......a.aa.a|........aa.ff|.........aPffff|...ddddddPPP|wwdGGGGGGPPP|.wGGGGGGGGPP|"
+                     ".wGGGGGGGGPP|..sssssssPP"
+                   : "|........a.a|.........a.a|..........aa|...dddddd..a|wwdGGGGGddPfa|.wGGGGGGGGPPf|.wGGGGGGGGPPff|"
+                     "..sssssssPP.ff|............ff|.............f",
+            "GdPwfas", {0x7E6E5A, 0x5C4E40, 0xD8D2C4, 0xF2EEE6, 0x4A3C30, 0xA89070, 0xA49680});
+     }},
+    // A red squirrel bounding along, its bushy tail bobbing behind it: gathered, off, stretched out, landing
+    {"squirrel", 9, 5, SQUIRREL_MS,
+     [](int f, const Canvas &c) {
+       static const char *const LOOK[] = {"..hh|.hhh...r|hh..rrrrr|...rrrrrb|....dd.d",
+                                          "hh|hhh.....r|.hhrrrrrr|...rrrrrb|..d.....d",
+                                          "|hh......r|hhhrrrrrr|.d.rrrrrb|d.......d",
+                                          "hh|hhh....r|.hhrrrrrr|..rrrrrrb|...d..dd"};
+       rows(c, LOOK[f], "rhdb", {0xB4552A, 0xD9843F, 0x7A3418, 0xF0E4C8});
+     }},
+    // and sitting up with its tail curled over its back, nibbling a nut in its paws, now and then looking about
+    {"squirrelnut", 6, 8, SQUIRRELNUT_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "rhdbn";
+       std::initializer_list<uint32_t> cols = {0xB4552A, 0xD9843F, 0x7A3418, 0xF0E4C8, 0x8C6A3C};
+       // the nut up at its mouth, lowered, and looking away
+       static const char *const HEAD[] = {"....r|...rrr|...rrr|.....n", "....r|...rrr|...rrb||.....n",
+                                          "...r|..rrr|..rrr||.....n"};
+       bool flick = pose<SQUIRRELNUT_MS>("0000000000100000000010", f);
+       rows(c, flick ? "hh|hhh|.hh|hh|hhh|.hh" : ".hh|hhh|hh|hh|hhh|.hh", KEYS, cols);
+       rows(c, "|||..rr|..rrr|.rrrb|.rrrb|..dd.d", KEYS, cols);
+       rows(c, HEAD[pose<SQUIRRELNUT_MS>("0101010121110101012111", f)], KEYS, cols);
+     }},
+    // A red fox trotting across the snow, its brush out behind it
+    {"fox", 16, 8, FOX_MS, [](int f, const Canvas &c) { fox_pose(c, f, 0); }},
+    // and stopping to look at you, then ahead again before it trots on
+    {"foxlook", 16, 8, FOXLOOK_MS, [](int f, const Canvas &c) { fox_pose(c, 4, pose<FOXLOOK_MS>("01210121210", f)); }},
+    // The mountain hare in its winter white, only its ear tips black: hopping, gathered, off, in the air, landing
+    {"harew", 10, 6, HARE_MS,
+     [](int f, const Canvas &c) {
+       static const char *const LOOK[] = {"......t|......Wt|...wWWWWW|..wWWWWWWW|.wwwwwwws|...ss.ss",
+                                          "........t|.......tW|..wWWWWWWW|wwWWWWWWW|ss......s",
+                                          ".........t|........tW|..wWWWWWWW|.wWWWWWWW|s........s",
+                                          "|.......t|......tW|..wWWWWWW|.wwwwwwws|s.....ss"};
+       rows(c, LOOK[f], "Wwst", {0xFFFFFF, 0xE6EAF0, 0xAEB8C8, 0x2A2A2A});
+     }},
+    // and sitting up, its ears up, one ear back, its nose going
+    {"haresitw", 7, 9, HARESIT_MS,
+     [](int f, const Canvas &c) {
+       static const char *const EARS[] = {"....t.t|....W.W|....WWW", "...t..t|....W.W|....WWW",
+                                          "....t.t|....W.W|....WWW"};
+       std::initializer_list<uint32_t> cols = {0xFFFFFF, 0xE6EAF0, 0xAEB8C8, 0x2A2A2A};
+       int p = pose<HARESIT_MS>("0120102", f);
+       rows(c, EARS[p], "Wwst", cols);
+       rows(c, "|||...WWtW|...WWWW|..wWWW|.wwWWW|wwwwws|.ss.ss", "Wwst", cols);
+       if (p == 2)  // its nose going
+         c.put(6, 4, cols.begin()[2]);
+     }},
+    // A roe buck at the edge of the meadow, small and slender: grazing, then its head up to look, ears twitching
+    {"roedeer", 9, 7, ROEDEER_MS,
+     [](int f, const Canvas &c) {
+       static const char *const LOOK[] = {"||.whhhhh|..rrrrrr|.......rs|.......hh|........k",  // grazing
+                                          "||.whhhhh|..rrrrrr|.......rs|.......hk",            // a tug
+                                          "......sa|......hhk|.whhhhr|..rrrrr",                // up
+                                          ".....s.a|......hhk|.whhhhr|..rrrrr"};               // an ear back
+       roe(c, "||||..sd.ds|..sd.ds|..sd.ds");
+       roe(c, LOOK[pose<ROEDEER_MS>("01012323201232", f)]);
+     }},
+    // and off in bounds, its white rump flashing
+    {"roedeerrun", 10, 7, ROEDEERRUN_MS,
+     [](int f, const Canvas &c) {
+       static const char *const LOOK[] = {"|......sa|......hhk|.whhhhr|.wrrrrr|...sds|...s.s",
+                                          "......sa|......hhk|whhhhhr|wwrrrrrs|.s.....ds|s........s",
+                                          "......sa|......hhk|whhhhhr|wwrrrrrs|.ds...dss|s",
+                                          "......sa|......hhk|.whhhhr|wwrrrrrr|..ds..ds|....s..s|.......s"};
+       roe(c, LOOK[f]);
+     }},
+    // Three white sheep grazing on the hillside in summer, the middle one facing the other way, each lifting its dark
+    // head from the grass now and then
+    {"sheep", 29, 6, SHEEP_MS,
+     [](int f, const Canvas &c) {
+       static const int8_t AT[] = {0, 1, 10, 2, 21, 0};
+       int head[] = {pose<SHEEP_MS>("02200011", f), pose<SHEEP_MS>("00222000", f), pose<SHEEP_MS>("00001110", f)};
+       // its head from the shoulder facing right, grazing, level and up
+       static const int8_t HEAD[3][6] = {{6, 2, 6, 3, 7, 3}, {6, 1, 7, 1, 7, 2}, {6, 1, 6, 0, 7, 0}};
+       for (int i = 0; i < 3; i++) {
+         int x = AT[i * 2], y = AT[i * 2 + 1];
+         rows(c, ".WWWW.|WWWWWW|wwwwww|.s..s.", "Wws", {0xF4F2EA, 0xD6D2C6, 0xA8A498}, x + (i == 1) * 2, y);
+         for (int k = 0; k < 3; k++) {  // the middle one facing left
+           int hx = HEAD[head[i]][k * 2];
+           c.put(i == 1 ? x + 7 - hx : x + hx, y + HEAD[head[i]][k * 2 + 1], 0x2A2420);
          }
-         dots(c, {12, 1, 13, 1, 13, 2, 14, 2}, 0x777766);
-         c.put(14, 3, 0x443333);
-         dots(c, {11, 0, 12, 0, 13, 0, 10, 1, 14, 0}, 0x776655);
-       } else {
-         dots(c, {11, 5, 12, 6}, 0xCCCCCC);
-         dots(c, {12, 7, 13, 8, 13, 9, 14, 9}, 0x777766);
-         c.put(14, 10, 0x443333);
-         dots(c, {12, 4, 13, 4, 11, 3, 14, 5, 13, 3}, 0x776655);
        }
-       for (int x : {4, 6, 9, 11})  // the legs
-         line(c, x, 9, x + STEP[f * 2 + (x == 6 || x == 9)], 11, 0x554433);
+     }},
+    // Someone on a kick-sled facing right, in a red jacket and a knitted hat with a bobble: standing on a runner
+    // behind the chair with their hands on the handlebar, kicking off twice with one foot, then gliding with both on
+    // the runners
+    {"kicksled", 14, 12, KICKSLED_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "whjdstkmb";
+       std::initializer_list<uint32_t> cols = {0xEEEEEE, 0x3A6ABF, 0xC8342C, 0x8E2420, 0xFFCC99,
+                                               0x60606F, 0x222222, 0x99AABB, 0xA06A30};
+       rows(c,
+            "......w|.....hh|.....hs|....jjj|....jjjd|...jjj..hh|...jjj...h|...tk....hbbb|....k....h..h|....k....h..h|"
+            "....kk...h..h|.mmmmmmmmmmmm",
+            KEYS, cols);
+       c.put(13, 10, 0x99AABB);
+       static const char *const LEG[] = {"....t|.....t|......kk", "...t|..t|.kk", "...t|..t|kt",
+                                          ".....t|.....t|.....kk"};
+       int k = pose<KICKSLED_MS>("0120123", f);
+       rows(c, LEG[k], KEYS, cols, 0, k == 3 ? 8 : 9);
+     }},
+    // Two children in snowsuits on a wooden sledge, sliding down a slope to the right, the sledge tilted with it: the
+    // snow sprays out behind, and over a bump it lifts and lands
+    {"sledge", 11, 9, SLEDGE_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "wsrbkpg";
+       std::initializer_list<uint32_t> cols = {0xB8823C, 0xFFCC99, 0xDD3333, 0x2E6FD8, 0x333333, 0xFFFFFF, 0xB8C8DC};
+       int b = f == 3 ? 0 : 1;  // up off the bump
+       rows(c, "....r|....s|...bbb.b|...bbbbs|....bbrrrk|.......rr", KEYS, cols, 0, b);
+       line(c, 3, 5 + b, 9, 6 + b, 0xB8823C);
+       line(c, 3, 6 + b, 9, 7 + b, 0x333333);
+       c.put(10, 6 + b, 0x333333);
+       static const char *const SPRAY[] = {"p|.g|p.g", ".p|g|.gp", "||..g", "g.p|.p.|gpg"};
+       rows(c, SPRAY[pose<SLEDGE_MS>("01023", f)], KEYS, cols, 0, 4);
+     }},
+    // A hiker on a trip in the mountains, walking to the right: a red anorak, a rucksack, knickers and a walking
+    // stick planted ahead every other step
+    {"hiker", 13, 14, HIKER_MS,
+     [](int f, const Canvas &c) {
+       int up = (f + 1) / 2 % 2;  // up a row passing the other foot
+       static const int8_t STICK[] = {11, 13, 10, 13, 9, 13, 11, 11};
+       int8_t s[2], l[8];
+       stride(STICK, 2, f, s);
+       line(c, 9, 3 - up, s[0], s[1], 0xB08A50);
+       rows(c, ".....oo|.....oss|..ooddrr|..oordrr|..oordrr.r|..oordrrr|...odrr|....rrr", "rdos",
+            {0xCC3322, 0x992219, 0x6A6A3A, 0xFFCC99}, 0, 1 - up);
+       // the legs from the hip: the near one's knee and foot, then the far one's
+       static const int8_t LEG[] = {7, 10, 8, 12, 5, 10, 3, 12, 6, 10, 6, 12, 6, 10, 5, 11,
+                                    5, 10, 4, 12, 7, 10, 8, 12, 6, 10, 5, 11, 6, 10, 6, 12};
+       stride(LEG, 8, f, l);
+       for (int k = 1; k >= 0; k--) {
+         int hip = 9 - up, kx = l[k * 4], ky = l[k * 4 + 1] - up, fx = l[k * 4 + 2], fy = l[k * 4 + 3];
+         uint32_t col = k ? 0x6A5C42 : 0x8A7A5A;
+         line(c, 6, hip, kx, ky, col);
+         line(c, kx, ky, fx, fy, col);
+         dots(c, {(int8_t) fx, (int8_t) (fy + 1), (int8_t) (fx + 1), (int8_t) (fy + 1)}, 0x3A2A1A);
+       }
+     }},
+    // Out picking mushrooms in the autumn, to the right with a basket on the arm, in a knitted hat and green rubber
+    // boots: two strides, then a stop by a chanterelle, bending down to it and picking it, and up again
+    {"mushroomer", 13, 14, MUSHROOMER_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "hsjdtgbcy";
+       std::initializer_list<uint32_t> cols = {0xAA3333, 0xFFCC99, 0x3A62B0, 0x2A4A88, 0x3A3F55,
+                                               0x2F6A3A, 0xB88A4A, 0xE8A030, 0x7A5A2A};
+       // 0-15 walking, then 4 by the chanterelle, 5 bending to it, 6 picking it, 7 up with it, 8 standing
+       bool walk = f < 16;
+       int p = walk ? 0 : f - 12, up = walk ? (f + 1) / 2 % 2 : 0;
+       if (p >= 4 && p <= 6)
+         rows(c, "ccc|.c", KEYS, cols, 10, 12);
+       if (p >= 5 && p <= 7) {  // bent at the hips, the basket swinging down to the ground with the arm
+         static const char *const BENT[] = {
+             "|||.......hh|......dhss|.....jjjd|....jjjjd|....jjjd|...tttdy|...t.tbccb|...t.t.bb|...t.t|...g.g|...gggg",
+             "||||||....jjjjj|...jjjjjhh|...ttjjdhss|...t.t.d|...t.t.ybby|...t.t.bccb|...g.g..bb|...gggg"};
+         rows(c, BENT[p == 6], KEYS, cols);
+         return;
+       }
+       rows(c, ".....hh|.....hss|....jjd|....jjd|....jjd|....jjdy|....jjjbccb|.......bbbb|........bb",
+            KEYS, cols, 0, 1 - up);
+       // the legs from the hip: the near one's knee and foot, then the far one's
+       static const int8_t LEG[] = {7, 11, 8, 12, 4, 11, 3, 12, 6, 11, 6, 12, 6, 11, 5, 11, 4, 11, 3, 12,
+                                    7, 11, 8, 12, 6, 11, 5, 11, 6, 11, 6, 12, 5, 11, 5, 12, 4, 11, 4, 12};
+       int8_t l[8];
+       if (walk)
+         stride(LEG, 8, f % 8, l);
+       else
+         memcpy(l, LEG + 32, 8);
+       for (int k = 1; k >= 0; k--) {
+         int hip = 9 - up, kx = l[k * 4], ky = l[k * 4 + 1] - up, fx = l[k * 4 + 2], fy = l[k * 4 + 3];
+         line(c, 5, hip, kx, ky, k ? 0x2A2E40 : 0x3A3F55);
+         line(c, kx, ky + 1, fx, fy, 0x2F6A3A);
+         dots(c, {(int8_t) fx, (int8_t) (fy + 1), (int8_t) (fx + 1), (int8_t) (fy + 1)}, 0x2F6A3A);
+       }
+     }},
+    // Someone mowing the lawn, pushing a red petrol mower to the right in a white T-shirt and shorts, the cut grass
+    // flying out from under it
+    {"mower", 23, 14, MOWER_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "hstpmdewc";
+       std::initializer_list<uint32_t> cols = {0x5A3A22, 0xFFCC99, 0xF2F2F2, 0x2A3A6A, 0xD0302A,
+                                               0x8A1C18, 0x3C3C40, 0x141414, 0xA8E070};
+       int up = (f + 1) / 2 % 2;  // up a row passing the other foot
+       rows(c, "||||||||................ee|...............eeee|..............mmmmmmm|.............dmmmmmmmd|"
+               "............ww.......ww|............ww.......ww",
+            KEYS, cols);
+       line(c, 11, 6, 14, 9, 0xA8ACB4);  // the handle
+       rows(c, "......hh|.....hhss|......ss|.....ttt|....tttt|....ttt|....ttt|....ttt|....ppp|....ppp", KEYS, cols, 0,
+            1 - up);
+       line(c, 7, 5 - up, 10, 7 - up, 0xFFCC99);  // the arm, out of the sleeve
+       c.put(7, 5 - up, 0xF2F2F2);
+       // the legs from the hip: the near one's knee and foot, then the far one's
+       static const int8_t LEG[] = {7, 11, 8, 12, 4, 11, 3, 12, 6, 11, 6, 12, 6, 11, 5, 12,
+                                    4, 11, 3, 12, 7, 11, 8, 12, 6, 11, 5, 12, 6, 11, 6, 12};
+       int8_t l[8];
+       stride(LEG, 8, f, l);
+       for (int k = 1; k >= 0; k--) {
+         int kx = l[k * 4], ky = l[k * 4 + 1] - up, fx = l[k * 4 + 2], fy = l[k * 4 + 3];
+         uint32_t col = k ? 0xE8B488 : 0xFFCC99;
+         line(c, 5, 10 - up, kx, ky, col);
+         line(c, kx, ky, fx, fy, col);
+         dots(c, {(int8_t) fx, (int8_t) (fy + 1), (int8_t) (fx + 1), (int8_t) (fy + 1)}, 0x2A2A2A);
+       }
+       if (!up)
+         rows(c, "||||||||||||.c.c|c", KEYS, cols, 9);
      }},
     {"skier", 14, 14, SKIER_MS,
      [](int f, const Canvas &c) {
-       bool left = f < 2, glide = f % 2 == 1;
+       // a kick off one ski, a glide, a kick off the other and a glide: where the poles and the legs reach down to
+       static const int8_t REACH[] = {11, 5, 10, 5, 10, 7, 8, 7, 5, 11, 6, 10, 10, 7, 8, 7};
+       int8_t r[4];
+       stride(REACH, 4, f, r);
+       bool left = f < 4;
        dots(c, {8, 0, 9, 0}, 0xCC2222);
        dots(c, {8, 1, 9, 1}, 0xFFCCAA);
        for (int y = 2; y <= 6; y++) {
          c.put(7 + (y < 4), y, 0x224499);
          c.put(8, y, 0x224499);
        }
-       line(c, 8, 3, glide ? 10 : left ? 11 : 5, 8, 0x9999AA);  // poles
-       line(c, 7, 3, glide ? 7 : left ? 5 : 11, 8, 0x9999AA);
-       line(c, 8, 7, glide ? 8 : left ? 10 : 6, 11, 0x333344);  // legs
-       line(c, 7, 7, glide ? 7 : left ? 5 : 10, 11, 0x333344);
+       line(c, 8, 3, r[0], 8, 0x9999AA);  // poles
+       line(c, 7, 3, r[1], 8, 0x9999AA);
+       line(c, 8, 7, r[2], 11, 0x333344);  // legs
+       line(c, 7, 7, r[3], 11, 0x333344);
        for (int x = 1; x <= 13; x++)
          c.put(x, 12, 0xAA6633);
-       for (int x = left ? 1 : 0; !glide && x <= (left ? 5 : 4); x++)
+       for (int x = left ? 1 : 0; x <= (left ? 5 : 4); x++)  // the front ski's tip, turned up
          c.put(x, 11, 0xAA6633);
      }},
-    // Snow slipping off the end of a spruce's tier: the clump sags, drops in a puff of powder that drifts down and
-    // thins, and the bare branch springs up. Its top row lies on the tier's last 4 px
+    // Snow slipping off the end of a spruce's tier or the eaves: the clump sags, drops in a puff of powder that
+    // drifts down and thins, and the bare branch springs up. Its top row lies on the tier's last 4 px. The clump
+    // is in shadow, so it shows against snow too.
     {"snowdrop", 9, 22, SNOWDROP_MS,
      [](int f, const Canvas &c) {
-       const uint32_t T = 0x224444, S = 0xBBCCDD, P = 0xDDDDEE;
+       const uint32_t T = 0x224444, S = 0x98A8C4, P = 0xCCD6E8;
        for (int x = 0; x < 4; x++)
          c.put(x, 0, f ? T : S);
        if (f <= 1) {  // the clump, then sagging
@@ -824,7 +1401,7 @@ static constexpr Fixed FIXED[] = {
            float d = fabsf(x - cx);
            if (d > wd || (y < 6 && r.in(0, 9) < 4))
              continue;
-           c.put(x, y, d < wd * 0.35f && y > 9 ? 0xFFFFDD : d < wd * 0.7f ? 0xFFCC33 : y < 7 ? 0xDD4422 : 0xFF7711);
+           c.put(x, y, d < wd * 0.22f && y > 13 ? 0xFFFFDD : d < wd * 0.7f ? 0xFFCC33 : y < 7 ? 0xDD4422 : 0xFF7711);
          }
        }
        for (int k = 0; k < 7; k++) {  // logs leaning in, dark against the fire
@@ -867,16 +1444,19 @@ static constexpr Fixed FIXED[] = {
        rows(c, f == 1 ? "y...y|.yWy|yWWWy|.yWy|y...y" : "..y|.yWy|yWWWy|.yWy|..y", "yW",
             {f == 2 ? 0xFFDD66u : 0xEECC44u, 0xFFFFEE});
      }},
-    // the sleigh by night, its colours dimmed like the rest of the night, Rudolph's nose still bright
-    {"sleigh", 36, 12, SLEIGH_MS,
+    // the sleigh by night, its colours dimmed like the rest of the night, the moon on the backs and the rail,
+    // Rudolph's nose still bright
+    {"sleigh", 37, 12, SLEIGH_MS,
      [](int f, const Canvas &c) {
-       const uint32_t gold = 0x887755, red = 0x773333, deer = 0x443322, dark = 0x332211;
+       const uint32_t gold = 0x887755, red = 0x773333, deer = 0x554433, dark = 0x332211, moon = 0x887766;
        for (int x = 1; x <= 13; x++)  // the runner
          c.put(x, 9, gold);
        dots(c, {0, 8, 14, 8}, gold);
-       for (int x = 2; x <= 12; x++)
+       for (int x = 2; x <= 12; x++) {
+         c.put(x, 4, moon);  // the rail
          for (int y = 5; y <= 8; y++)
            c.put(x, y, y == 5 ? red : 0x662222);
+       }
        for (int x = 4; x <= 7; x++)  // the sack
          for (int y = 2; y <= 4; y++)
            c.put(x, y, 0x443322);
@@ -885,13 +1465,16 @@ static constexpr Fixed FIXED[] = {
          c.put(10, y, red);
        }
        dots(c, {11, 0, 10, 2, 11, 2}, 0x9999AA);
-       line(c, 13, 6, 18, 6, dark);
+       line(c, 13, 6, 18, 6, 0x554433);  // the trace
        static const int8_t S[] = {1, -1, 0, 0, -1, 1, 0, 0};
        for (int ox = 18; ox <= 27; ox += 9) {  // two reindeer
-         for (int x = ox; x <= ox + 6; x++)
+         for (int x = ox; x <= ox + 6; x++) {
+           c.put(x, 4, moon);
            for (int y = 5; y <= 6; y++)
              c.put(x, y, deer);
+         }
          dots(c, {(int8_t) (ox + 7), 4, (int8_t) (ox + 8), 4, (int8_t) (ox + 8), 3}, deer);
+         c.put(ox + 7, 3, moon);
          c.put(ox + 9, 4, ox == 27 ? 0xFF3333 : deer);
          dots(c, {(int8_t) (ox + 7), 2, (int8_t) (ox + 8), 1, (int8_t) (ox + 6), 1}, dark);
          line(c, ox + 1, 7, ox + 1 + S[f * 2], 9, dark);
@@ -912,7 +1495,7 @@ static constexpr Fixed FIXED[] = {
     {"chick", 6, 6, CHICK_MS,
      [](int f, const Canvas &c) {
        static const char *const LOOK[] = {"..yy|.yyeyb|yyyy|yyyy|.yy|.l.l", "|..yy|.yyey|yyyyyb|.yy|.l.l",
-                                          "..yy|.yyeyb|yyyy|yyyy|.yy|.l.l", ".yy|yyeyb|yyy|yyy|.yy"};
+                                          "..yy|.yyeyb|yyyy|yyyy|.yy|.l.l", ".yy|yyeyb|yyy|yyy|.yy|.l.l"};
        rows(c, LOOK[f], "yebl", {0xFFEE55, 0x222222, 0xFF9922, 0xFF9922});
      }},
     // A hare three chicks long, hopping: crouched, pushing off, stretched out in the air, landing
@@ -936,9 +1519,12 @@ static constexpr Fixed FIXED[] = {
        static const char *const EARS[] = {"...........e.e|...........e.e|...........e.e",
                                           "............ee|...........e|...........e.e",
                                           "...........e.e|...........e.e|...........e.e"};
-       const char *body = f == 2 ? "..........hhhh|........bbhhhh.k|....bbbbbbbbb|...wbbbbbbbbb|....bbbbbbbbb|....ll...lll"
-                                 : "..........hhhh|........bbhhhhk|....bbbbbbbbb|...wbbbbbbbbb|....bbbbbbbbb|....ll...lll";
-       rows(c, EARS[f], "e", {0x887755}, 2, 3);
+       int p = pose<HARESIT_MS>("0120102", f);
+       const char *body = p == 2 ? "..........hhhh|........bbhhhh.k|....bbbbbbbbb|"
+                                   "...wbbbbbbbbb|....bbbbbbbbb|....ll...lll"
+                                 : "..........hhhh|........bbhhhhk|....bbbbbbbbb|"
+                                   "...wbbbbbbbbb|....bbbbbbbbb|....ll...lll";
+       rows(c, EARS[p], "e", {0x887755}, 2, 3);
        rows(c, body, "bhkwl", {0x998866, 0xAA9977, 0x332222, 0xEEEEEE, 0x776655}, 2, 6);
      }},
     // 17 May: a few children walking in a row, each waving a small flag, the first with a drum
@@ -948,7 +1534,7 @@ static constexpr Fixed FIXED[] = {
                              SKIN[] = {0xFFCC88, 0xEECC99, 0xFFCCAA, 0xDDBB88};
        static const char *const FLAG[] = {"rwbr|rwbr|wwbw", "rrw|rrw|www", "rwb|wwb|rwb"};
        for (int i = 0; i < 4; i++) {
-         int x0 = i * 8, step = (f + i) % 2, wave = (f + i * 2) % 3, y0 = 5;
+         int x0 = i * 8, step = (f + i) % 2, wave = (f / 2 + i) % 3, y0 = 5;
          for (int x = x0 + 2; x <= x0 + 3; x++) {
            c.put(x, y0, 0x664422);  // hair
            c.put(x, y0 + 1, SKIN[i]);
@@ -985,10 +1571,10 @@ static constexpr Fixed FIXED[] = {
      [](int f, const Canvas &c) {
        static const char *const H[] = {"x.x|.x", ".x.x|xxxxx|.xxx|..x", ".xx.xx|xhxxxxx|xxxxxxx|.xxxxx|..xxx|...x",
                                        ".xxx.xxx|xhxxxxxxx|xxxxxxxxx|xxxxxxxxx|.xxxxxxx|..xxxxx|...xxx|....x"};
-       int s = pose<HEART_MS>("012322322", f), o = 3 - s;  // o centres it
+       int s = pose<HEART_MS>("0123223222", f), o = 3 - s;  // o centres it
        rows(c, H[s], "xh", {f == 3 || f == 6 ? 0xFF5588u : 0xEE4477u, 0xFFBBDD}, o, o);
-       for (int i = 0; f == 8 && i < c.w * c.h; i++)  // thinning out
-         if (noise(i % c.w - o, i / c.w - o, 3) < 45)
+       for (int i = 0; f >= 8 && i < c.w * c.h; i++)  // thinning out, a little and then most of it
+         if (noise(i % c.w - o, i / c.w - o, 3) < (f == 8 ? 25 : 60))
            c.px[i] = 0;
      }},
     // the owl, gliding with slow deep beats, its pale face and eyes catching what light there is
@@ -996,11 +1582,12 @@ static constexpr Fixed FIXED[] = {
      [](int f, const Canvas &c) {
        static const int8_t TIP[] = {3, 1, 0, 0, 3, 3, 0, 3, 3, 4, 1, 6, 3, 3, 0, 4};  // up, mid, down, glide
        const int8_t *t = TIP + pose<OWL_MS>("012133", f) * 4;
-       for (int s = 0; s < 2; s++) {
+       for (int s = 0; s < 2; s++) {  // the wings two rows thick, the moon on their leading edge
          auto m = [&](int x) { return s ? 14 - x : x; };
-         line(c, m(5), 3, m(t[0]), t[1], 0x554433);
+         line(c, m(5), 3, m(t[0]), t[1], 0x776655);
          line(c, m(5), 4, m(t[0]), t[1] + 1, 0x443322);
-         line(c, m(t[0]), t[1], m(t[2]), t[3], 0x443322);
+         line(c, m(t[0]), t[1], m(t[2]), t[3], 0x776655);
+         line(c, m(t[0]), t[1] + 1, m(t[2]), t[3] + 1, 0x443322);
        }
        for (int x = 5; x <= 9; x++)
          for (int y = 2; y <= 5; y++)
@@ -1010,7 +1597,7 @@ static constexpr Fixed FIXED[] = {
        c.put(7, 4, 0x776655);
        dots(c, {7, 6, 6, 6, 8, 6}, 0x443322);
      }},
-    // and perched on a spruce top: it sits, turns its head right round, blinks, hoots
+    // and perched on a spruce top: it sits, turns its head right round and back, blinks, hoots
     {"owlperch", 9, 11, OWLPERCH_MS,
      [](int f, const Canvas &c) {
        static const char *const HEAD[] = {
@@ -1020,11 +1607,8 @@ static constexpr Fixed FIXED[] = {
            "..b...b|..bbbbb|.bfffffb|.bfefefb|.bffoffb"};
        static const char *const KEYS = "bfekowt";
        std::initializer_list<uint32_t> cols = {0x554433, 0x998877, 0xFFCC33, 0x443322, 0x221111, 0x776655, 0x443322};
-       rows(c, HEAD[f], KEYS, cols);
-       rows(c,
-            f == 2 ? ".bbbbbbb|.bbbbbbb|.bbbbbbb|..bbbbb|...t.t|..ttttt"
-                   : ".bbbbbbb|.bwbbbwb|.bbwbwbb|..bbbbb|...t.t|..ttttt",
-            KEYS, cols, 0, 5);
+       rows(c, HEAD[pose<OWLPERCH_MS>("012103456", f)], KEYS, cols);
+       rows(c, ".bbbbbbb|.bwbbbwb|.bbwbwbb|..bbbbb|...t.t|..ttttt", KEYS, cols, 0, 5);
      }},
     // The pumpkin's candle: the picture's FACE lights up and dims all at once, brighter at the bottom where the
     // flame is
@@ -1037,6 +1621,172 @@ static constexpr Fixed FIXED[] = {
              c.put(x, y, COL[std::min(4, pose<PUMPKIN_MS>("213021", f) + (y > 3))]);
      }},
     // ---- the rare ones, see met_live_rare.h
+    // A lynx facing right on long legs, grey-tawny with a spot or two, its ears tufted and its short tail black at the
+    // tip: it walks three strides, stops, looks at you and behind it, and looks ahead again to walk on
+    {"lynx", 12, 8, LYNX_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "ohspwk";
+       std::initializer_list<uint32_t> cols = {0xA8906E, 0xC4AC88, 0x806A50, 0x5E4C3A, 0xE2D8C6, 0x1E1A16};
+       static const int8_t STEP[] = {-1, 1, -1, 1, 0, 0, 0, 1, 1, -1, 1, -1, 0, 0, 1, 0};  // the feet from the hips
+       int walk = f < 12 ? f % 4 : -1;
+       for (int i : {1, 2, 0, 3}) {  // near hind, far hind, far front, near front, the far ones first and darker
+         int x = i < 2 ? 3 + i : 5 + i, d = walk < 0 ? 0 : STEP[walk * 4 + i];
+         int up = (walk == 1 && i == 0) || (walk == 3 && i == 1);
+         line(c, x, 5, x + d, 7 - up, i == 1 || i == 2 ? 0x6E5C46 : 0x806A50);
+       }
+       rows(c, "|||kkhhhhhhh|..oopoopoo|..ooooooo", KEYS, cols);
+       // ahead, at you, behind it
+       static const char *const HEAD[] = {"..........k|.........hoo|........hopow|.........ww",
+                                          ".......k...k|.......hoooh|.......opopo|........wpw",
+                                          ".........k|........ooh|.......wopoh|........ww"};
+       rows(c, HEAD[f < 12 ? 0 : "01210"[f - 12] - '0'], KEYS, cols);
+     }},
+    // Two orcas heading right in a fjord, surfacing in turn: a blow of mist, the back with its dorsal fin, the bull's
+    // tall and straight, the cow's lower and curved back, the grey saddle behind it. Then the cow lifts her flukes and
+    // slaps them down in a splash. The water at row 7
+    {"orcas", 24, 8, ORCAS_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "khwgmnr";
+       std::initializer_list<uint32_t> cols = {0x16181E, 0x3E4656, 0xF0F4F8, 0x98A2B0, 0xD8E0E8, 0xAAB6C4, 0x8FAAD4};
+       static const char *const BULL[] = {"||||||......kkh|.....w....w", "|||||....k|....kk|..hkkkkk|.w......w",
+                                          "||....k|....k|....k|...kk|.kgkkkkh|w........w",
+                                          "||||...k|..kk|.kgkkk|r.....r", "|||||||r.r..r.r"};
+       static const char *const COW[] = {"||||||.....kkh|....w....w", "||||||..kkkkh|.w......w",
+                                         "|||...k|....k|....kk|..kgkkkkh|w.......w", "|||||..k|.kgkk|r....r"};
+       static const char *const BLOW[] = {"|.n.n|.mmn|nmmm|.mn|..m", "n...n|.n.n|..n.n|...n"};
+       static const char *const TAIL[] = {"||||||...kk|..kkkk|.w...w", "|||k..k|.kk|..k|..k|.w.w",
+                                          "|||.w...w|..w.w|w.www.w|.wwwww", "|||||.w..w|..ww|.wwww",
+                                          "|||||||r.r..r"};
+       int bull = pose<ORCAS_MS>("-01234----------", f), cow = pose<ORCAS_MS>("------0123------", f),
+           tail = pose<ORCAS_MS>("-----------01234", f);
+       if (bull >= 0)
+         rows(c, BULL[bull], KEYS, cols);
+       if (bull >= 0 && bull < 2)
+         rows(c, BLOW[bull], KEYS, cols, 4);
+       if (cow >= 0)
+         rows(c, COW[cow], KEYS, cols, 13);
+       if (cow >= 0 && cow < 2)
+         rows(c, BLOW[cow], KEYS, cols, 16, 1);
+       if (tail >= 0)
+         rows(c, TAIL[tail], KEYS, cols, 14);
+     }},
+    // The sea eagle's rare catch, flying right, the water at its bottom row: it glides down with its talons out,
+    // throws its wings up and strikes, the spray flies round its feet, and it beats up off the water with a fish and
+    // flies off with it. The show brings it down to the water over the first frame, holds it there to the end of the
+    // first beat, so the spray stays on the water, and takes it away over the rest
+    {"seaeaglecatch", 24, 18, SEAEAGLECATCH_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "ykfgsa";
+       std::initializer_list<uint32_t> cols = {0xF0C030, 0x1A1410, 0xD8DEE6, 0x5A6A7A, 0xFFFFFF, 0xA8D0EC};
+       eagle_body(c, true);
+       if (f == 0)  // its talons out
+         rows(c, "||||||||||||||.............yy|..............yyy|...............kyk|...............k.k", KEYS, cols);
+       else if (f <= 3)  // in the water
+         rows(c, "||||||||||||||.............yy|.............yy|.............yy|............kkkk", KEYS, cols);
+       else  // the fish
+         rows(c, "||||||||||||||.............yy|..........g.gggggg|...........ffffffff|..........g..ffff", KEYS,
+              cols);
+       static const int8_t WING[] = {5, 0, 0, 1, 3, 1, 4, 0, 2};
+       eagle_wing(c, WING[f], true);
+       static const char *const SPRAY[] = {
+           "|||||||||||||||...........s.....s|............sssss|..........aassssaa",
+           "||||||||||||s..........s.s|..s........s...s|....s.....s.....s|..........s.s.s.s|........aassssssaa",
+           "||||||||||||||||.........s....s....s|........s..s.s..s"};
+       if (f >= 2 && f <= 4)  // the strike, the spray, falling back
+         rows(c, SPRAY[f - 2], KEYS, cols);
+     }},
+    // A ski jumper flying to the right in the V style, lying forward over the skis with the arms back, wobbling a
+    // little, then touching down in a telemark, arms out, and riding out upright. Its skis on the bottom row once down
+    {"skijumper", 22, 13, SKIJUMPER_MS,
+     [](int f, const Canvas &c) {
+       const uint32_t suit = 0xD03030, shade = 0x8A1E1E, legs = 0x28407A, ski = 0x2A2A3A, helmet = 0xEEEEEE;
+       int k = pose<SKIJUMPER_MS>("01020102345", f);
+       if (k < 3) {  // in flight: the skis' tips apart, or wider, or the body a row lower
+         int spread = k == 1, pitch = k == 2;
+         line(c, 2, 11, 21, 4 - spread, ski);
+         line(c, 2, 11, 21, 8 + spread, ski);
+         line(c, 6, 9, 10, 6 + pitch, legs);
+         line(c, 7, 9, 11, 6 + pitch, legs);
+         line(c, 11, 5 + pitch, 15, 3 + pitch, suit);
+         line(c, 11, 6 + pitch, 15, 4 + pitch, suit);
+         line(c, 14, 5 + pitch, 9, 7 + pitch, shade);  // the near arm back along the body
+         dots(c, {16, (int8_t) (2 + pitch), 17, (int8_t) (2 + pitch), 16, (int8_t) (3 + pitch)}, helmet);
+         c.put(17, 3 + pitch, 0xFFCC99);
+         return;
+       }
+       line(c, 1, 12, 20, 12, ski);
+       c.put(21, 11, ski);
+       static const char *const LOOK[] = {
+           "||||...........ww|..........rrs|.........rrr|...sddddrrr|........ll|........lll|.........ll|........lll",
+           "|.........ww|.........ws|....s....rr....s|.....dddrrrddd|.........rr|.........rr|........ll|"
+           "........l.l|.......l...l|.......l...l|....lll....ll",
+           "|.........ww|.........ws|.........rr|........rrrd|........rr.d|........rr..s|........ll|.........ll|"
+           ".........ll|........ll|........lll"};
+       rows(c, LOOK[k - 3], "wsdrl", {helmet, 0xFFCC99, shade, suit, legs});
+     }},
+    // The huldra at the edge of the forest, a fair young woman in a blue-green dress with her hair down to her
+    // knees: she stands facing out, her hair stirring, then turns away and walks off to the right, her cow's tail
+    // showing under the hem, and looks back over her shoulder once
+    {"huldra", 9, 12, HULDRA_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "hHsdDwktT";
+       std::initializer_list<uint32_t> cols = {0xF2DC8C, 0xC9A75A, 0xF2C8A8, 0x3E9A8E, 0x24685F,
+                                               0xEEEEE6, 0x3A2E28, 0xD0A47A, 0xA87E58};
+       int p = pose<HULDRA_MS>("0102343456563434", f);
+       if (p < 2) {
+         rows(c, "...hhH|..hssH|..hssHH|.hwddwH|.hwddwH|.hsddsH|.hdddDH|..ddddD|.dddddDD|.ddddddD|...s.s|...k.k", KEYS,
+              cols);
+         if (p == 1)  // a lock lifts in the breeze
+           c.put(7, 4, 0xC9A75A);
+         return;
+       }
+       if (p == 2) {  // turning
+         rows(c, "...hhh|...hhhs|..hhhs|..hhdw|..hhdw|..hhds|..Hhddd|..ddddd|.ddddddd|.ddddddd|.t..s.s|TT..k.k", KEYS,
+              cols);
+         return;
+       }
+       rows(c, p > 4 ? "...hhh|..shhh|..shh" : "...hhh|...hhhs|...hhs", KEYS, cols);  // looking back, or ahead
+       rows(c, "...hdw|...hdw|...hds|...Hddd|..ddddd|..dddddd|.ddddddd", KEYS, cols, 0, 3);
+       if (p % 2)  // striding, the tail swung out behind
+         rows(c, ".t.s...s|T..k...k", KEYS, cols, 0, 10);
+       else  // passing, the tail hanging
+         rows(c, "..t..ss|.TT..kk", KEYS, cols, 0, 10);
+     }},
+    // A nisse facing right in his grey homespun, a red cap and a white beard, his lantern lit: he walks on short
+    // steps, stops, holds the lantern up and looks back and ahead, lowers it and walks on
+    {"nisse", 8, 8, NISSE_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "rRsnwgGkL";
+       std::initializer_list<uint32_t> cols = {0xD82A22, 0x962018, 0xF0B898, 0xE88870, 0xF2F2EE,
+                                               0x7E7A76, 0x4E4A47, 0x2E2622, LAMP};
+       static const char *const LOOK[] = {
+           // walking, the lantern low
+           "...r|..rrr|.Rrrrr|R.wsn|..www|.gwwgs|.gGgg.L|.k..k", "...r|..rrr|.Rrrrr|R.wsn|..www|.gwwgs|.gGgg.L|..kk",
+           "...r|..rrr|.Rrrrr|R.wsn|..www|.gwwgs|.gGgg.L|.k.k",  // standing
+           // holding it up, looking ahead and back
+           "...r..L|..rrrsL|.Rrrrg|R.wsng|..wwwg|.gwwg|.gGgg|.k.k",
+           "...r..L|..rrrsL|.rrrrg|.nswRg|..wwwg|.gwwg|.gGgg|.k.k"};
+       rows(c, LOOK[pose<NISSE_MS>("01010101010123432010101010101", f)], KEYS, cols);
+     }},
+    // Draugen, facing right: a hunched fisherman in black oilskins with a clump of seaweed for a head, pushing his
+    // oars facing the way he goes in half a boat, its broken end behind him. It rises and falls on the swell, the sea
+    // at row 7
+    {"draugen", 12, 8, DRAUGEN_MS,
+     [](int f, const Canvas &c) {
+       static const char *const KEYS = "ohrkKbgc";
+       std::initializer_list<uint32_t> cols = {0x34362E, 0x7A806A, 0xD0D8E8, 0x52622E,
+                                               0x8A9848, 0x6E6458, 0xA09484, 0xC8B898};
+       static const char *const MAN[] = {// the stroke: hands in, pushing, out, and back
+                                         "|...rrK|..rook|..rooh|..oooo", "|....rrK|...rook|...rooh|..ooooo",
+                                         "|....rrK|...rook|...roooh|..ooooo", "|...rrK|..rook|..rooh|..oooo"};
+       static const int8_t OAR[] = {6, 3, 9, 7, 7, 3, 7, 7, 8, 4, 5, 7, 7, 3, 9, 5};  // hands to blade
+       int p = f % 4, dy = pose<DRAUGEN_MS>("00111100", f);
+       rows(c, "..........b|..........b|.........b|.........b|........bb|cggggggggb|cbbbbbbbb", KEYS, cols, 0, dy);
+       rows(c, MAN[p], KEYS, cols, 0, dy);
+       const int8_t *o = OAR + p * 4;
+       line(c, o[0], o[1] + dy, o[2], std::min(7, o[3] + dy), 0xB8A888);
+       rows(c, dy ? ".ff.ff.ff.f" : "ff.fff.ff.ff", "f", {0xD8EAF0}, 0, 7);  // the foam
+     }},
     // A garden trampoline tumbling end over end, a sixth of a turn a frame: its black mat in the blue padding, and
     // the legs bent out under it
     {"trampoline", 26, 26, TRAMPOLINE_MS,
@@ -1076,7 +1826,9 @@ static constexpr Fixed FIXED[] = {
        static const char *const KEYS = "rkdh";
        std::initializer_list<uint32_t> cols = {0xDD2E2E, 0x333333, 0x777777, 0x8A5A2A};
        rows(c, TOP[f], KEYS, cols);
-       rows(c, "..rrrrrrrrr..|...rrrrrrr...|....rrrrr....|.....rdr.....|......d|......d|......d|......d|......d..h|.......hh",
+       rows(c,
+            "..rrrrrrrrr..|...rrrrrrr...|....rrrrr....|.....rdr.....|"
+            "......d|......d|......d|......d|......d..h|.......hh",
             KEYS, cols, 0, 3);
      }},
     // Someone's striped T-shirt off the line, its sleeves flapping up and down and its hem rippling
@@ -1097,7 +1849,7 @@ static constexpr Fixed FIXED[] = {
          }
      }},
     // A Norwegian Red, red and white, on its side as it tumbles, its legs kicking
-    {"cow", 19, 12, COW_MS,
+    {"cow", 20, 12, COW_MS,
      [](int f, const Canvas &c) {
        static const char *const LEGS[] = {"...r.r.....r.r|...r.r.....r.r|...k.k.....k.k",
                                           "..r...r...r...r|.r.....r.r.....r|k.......k.......k"};
@@ -1138,11 +1890,11 @@ static constexpr Fixed FIXED[] = {
          for (int x = -3; x <= 3; x++) {
            int top = 8 - iround((float) h * sqrtf(1 - (float) (x * x) / 16));
            for (int y = top; y < 8; y++)
-             c.put(cx + x, y, y == top ? 0x5E8C6A : 0x2F4F3C);
+             c.put(cx + x, y, y == top ? 0x8FC79A : 0x3C6B4C);
          }
          dots(c, {(int8_t) (cx - 4), 8, (int8_t) (cx + 4), 8}, 0xCFE3EA);
        }
-       rows(c, "....hhhh|...hhhhhe|..hh.hhhh|..hh|..hh|..hh|..hh|.hhh|wwwww", "hew", {0x2F4F3C, 0xE8D040, 0xCFE3EA},
+       rows(c, "....hhhh|...hhhhhe|..hh.hhhh|..hh|..hh|..hh|..hh|.hhh|wwwww", "hew", {0x3C6B4C, 0xE8D040, 0xCFE3EA},
             24, 0);
      }},
     // A troll facing right with a spruce growing out of its head and a long nose, walking: a stride and a step
@@ -1216,7 +1968,8 @@ static constexpr Fixed FIXED[] = {
                                                0xD8AA50, 0x2C2440, 0x9A6AD0, 0x3A2856, 0xA05A20};
        rows(c, ".......h|........hh|........hhh|.......hbbbh|.....hhhhhhhhh", KEYS, cols);  // its tip blown back
        rows(c, ".......rfff|......rrffff|.......ccc|......cccc", KEYS, cols, 0, 5);
-       rows(c, f ? "..cc|.cccc|cd" : "|cccc|.cdd", KEYS, cols, 3, 6);
+       static const char *const CAPE[] = {"|cccc|.cdd", "|.cccc|cdd", "..cc|.cccc|cd"};  // down, out, up
+       rows(c, CAPE[pose<WITCH_MS>("0121", f)], KEYS, cols, 3, 6);
        rows(c, "yy|yyytooooooooooooo|yyy...dd|y.y....kk", KEYS, cols, 0, 8);
      }},
     // ---- the city
@@ -1239,6 +1992,95 @@ static constexpr Fixed FIXED[] = {
        for (int i = 0; i < 4; i++)
          c.put(i % 2, i / 2, COL[f]);
      }},
+    // Pigeons on a roof edge, as far off as the town's roofs are: specks that bob now and then, then lift off
+    // together, wheel round once, their wings flashing pale as they turn, and settle again
+    {"pigeons", 34, 16, PIGEONS_MS,
+     [](int f, const Canvas &c) {
+       // where each sits along the bottom row facing right, and its place in the flock, x, y
+       static const int8_t SIT[] = {2, 8, 13, 20, 27}, OFF[] = {-4, 1, -1, -1, 1, 1, 3, -1, 0, 2};
+       // sitting, a digit a frame: 0 hunched, 1 its head up, 2 a step along and back
+       static const char *const BOB[] = {"01000100", "00010002", "10000010", "00200100", "00001000"};
+       // flying, its wings up, out and down, pale underneath as they turn
+       static const char *const FLY[] = {"k.k|.k", "|kkk", "|.k|W.W"};
+       constexpr uint32_t K = 0x464C5C, W = 0xD0D4DC;
+       constexpr int N = 14;  // the flight's frames
+       for (int i = 0; i < 5; i++) {
+         if (f < 8) {
+           int b = BOB[i][f] - '0', x = SIT[i] + (b == 2);
+           rows(c, b == 1 ? "..k|..k|kkk" : "|..k|kkk", "k", {K}, x, 13);
+           continue;
+         }
+         // round once and back, rising out of its place over the first frames and into it over the last
+         int t = f - 8;
+         float a = 1.5708f + 6.2832f * (t + 0.5f) / N, e = std::min(1.0f, std::min(t + 1, N - t) / 3.0f);
+         float x = SIT[i] + (16 + 12 * cosf(a) + OFF[2 * i] - SIT[i]) * e;
+         float y = 15 + (8 + 5 * sinf(a) + OFF[2 * i + 1] - 15) * e - 1;
+         rows(c, FLY[(t + i) % 3], "kW", {K, W}, iround(x), iround(y) - 1);
+       }
+     }},
+    // An Oslo city bus by day, and by night with its windows lit
+    {"bus", 30, 10, BUS_MS, [](int f, const Canvas &c) { bus_pose(c, f, false); }},
+    {"busnight", 30, 10, BUS_MS, [](int f, const Canvas &c) { bus_pose(c, f, true); }},
+    // A snowplough by night after a snowfall, the front to the right: its blade throwing up a curl of snow in the
+    // headlights, the amber light on the cab's roof going round, then the one at the back. Drawn in the night's
+    // colours
+    {"plough", 26, 10, PLOUGH_MS,
+     [](int f, const Canvas &c) {
+       const uint32_t cab = 0x7A5028, low = 0x5A3A1C, box = 0x3A3A44, rim = 0x52525C, chassis = 0x18181E,
+                      glass = 0x26303E, glow = 0xA86C34, ember = 0x664422;
+       for (int y = 2; y <= 6; y++)  // the spreader behind the cab
+         for (int x = 1; x <= 9; x++)
+           c.put(x, y, y == 2 ? rim : box);
+       for (int x = 0; x <= 17; x++)
+         c.put(x, 7, chassis);
+       for (int y = 3; y <= 6; y++)
+         c.put(10, y, chassis);
+       for (int y = 1; y <= 6; y++)  // the cab
+         for (int x = y == 1 ? 12 : 11; x <= 16; x++)
+           c.put(x, y, y == 6 ? low : cab);
+       for (int y = 2; y <= 3; y++) {
+         for (int x = 12; x <= 14; x++)
+           c.put(x, y, glass);
+         c.put(16, y, glass);
+       }
+       c.put(17, 4, 0xFFFFDD);
+       dots(c, {17, 5, 17, 6, 18, 6}, chassis);
+       // the beacons: the cab's flashes, dims and goes dark, and the one at the back flashes in between
+       static const uint32_t CAB[] = {0xFFDD66, 0xEE9922, ember, ember};
+       dots(c, {13, 0, 14, 0}, CAB[f]);
+       for (int x = 12; f == 0 && x <= 15; x++)
+         c.put(x, 1, glow);
+       c.put(1, 1, f == 2 ? 0xFFDD66 : ember);
+       for (int x = 1; f == 2 && x <= 3; x++)
+         c.put(x, 2, glow);
+       // the blade, curved, and the snow rolling up its face and curling over off the top
+       static const int8_t BLADE[] = {20, 2, 19, 3, 19, 4, 18, 5, 18, 6, 18, 7, 19, 8, 19, 9};
+       for (int i = 0; i < 16; i += 2) {
+         c.put(BLADE[i] - 1, BLADE[i + 1], low);
+         c.put(BLADE[i], BLADE[i + 1], glow);
+       }
+       static const char *const SNOW[] = {"..sW|.sWWWs|.W..sW|W....s|W.....s|W|WW....s|.WWs|.WWWs",
+                                          "...sW|.sWWW|.W..Ws|W...sW|W|Ws....s|WW|.WWs..s|.WWWs",
+                                          "..sWs|.sWWW.s|.W..sW|Ws...s|W.....s|WW|Ws|.WWW|.WWWs",
+                                          "..s.s|.sWWW|.W.sWW|W....W|Ws....s|W|WW....s|.WWW|.WWWs"};
+       rows(c, SNOW[f], "Ws", {0xE8EEF6, 0xA0AECA}, 19, 1);
+       static const int8_t SPOT[] = {1, 0, 2, 1, 1, 2, 0, 1};  // round the wheel the way it turns
+       for (int wx : {1, 5, 12}) {
+         for (int i = 0; i < 9; i++)
+           c.put(wx + i % 3, 7 + i / 3, i == 4 ? box : chassis);
+         c.put(wx + SPOT[f * 2], 7 + SPOT[f * 2 + 1], rim);
+       }
+     }},
+    // Someone cycling to the right on the street, far off: a helmet, a hi-vis jacket, pedalling, the wheels turning
+    {"cyclist", 6, 6, CYCLIST_MS,
+     [](int f, const Canvas &c) {
+       rows(c, "...w|..yy|..y.k|.rjr|kk..kk|kk..kk", "wyjrk", {0xEEEEEE, 0xF2D21E, 0x4A6699, 0xCC2222, 0x222222});
+       for (int hx : {0, 4}) {  // a lighter spot going round each wheel
+         static const int8_t S[] = {0, 0, 1, 0, 1, 1, 0, 1};
+         c.put(hx + S[f * 2], 4 + S[f * 2 + 1], 0x888888);
+       }
+       c.put(f % 2 ? 3 : 2, 4, 0x4A6699);  // the foot going round
+     }},
 };
 
 // The ones a factory makes
@@ -1251,8 +2093,8 @@ static const Made MADE[] = {
     {"puff", [] { return smoke_puff({0xEEEEEE, 0xCCCCDD, 0x9999AA}); }},
     {"puffdusk", [] { return smoke_puff({0xAAAABB, 0x9999AA, 0x777788}); }},
     {"puffnight", [] { return smoke_puff({0x555566, 0x444455, 0x333344}); }},
-    {"butterfly", [] { return butterfly(0xEE6622, 0x221111, 0x3366CC, 0x997755); }},  // a small tortoiseshell
-    {"brimstone", [] { return butterfly(0xFFEE66, 0xDDCC44, 0xFFEE66, 0xCCCC88); }},
+    {"butterfly", [] { return butterfly(0xFF8822, 0x221111, 0x3366CC, 0x997755); }},  // a small tortoiseshell
+    {"brimstone", [] { return butterfly(0xFFFF66, 0xDDCC33, 0xFFFF66, 0xCCCC77); }},
     {"fwpink", [] { return firework({0xFFFFFF, 0xFFCCEE, 0xFF77BB, 0xBB4488, 0x773344}, 3); }},
     {"fwcyan", [] { return firework({0xFFFFFF, 0xCCFFFF, 0x66DDFF, 0x3388AA, 0x224455}, 5); }},
     {"fwgold", [] { return firework({0xFFFFFF, 0xFFFFDD, 0xFFDD66, 0xCC8833, 0x774422}, 7); }},

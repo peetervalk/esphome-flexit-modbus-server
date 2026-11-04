@@ -27,7 +27,7 @@ This project implements a Modbus server for Flexit ventilation systems using ESP
 
 | MCU             | RS485 Breakout Board | Notes                                                                 |
 |-----------------|---------------------|-----------------------------------------------------------------------|
-| XIAO-ESP32-C3   | XIAO-RS485-Expansion-Board  | [Details](hardware/xiao-esp32-c3-rs485-breakout-board-for-seeed-studio-xiao-tp8485e.md) |
+| XIAO ESP32-C3, or another ESP32 XIAO | XIAO RS485 Expansion Board | [Details](hardware/xiao-esp32-c3-rs485-breakout-board-for-seeed-studio-xiao-tp8485e.md) |
 
 ---
 
@@ -37,7 +37,8 @@ This project implements a Modbus server for Flexit ventilation systems using ESP
    (see [Recommended hardware](#recommended-hardware)).
 
 2. **Create your ESPHome config.** Start from [`example.yaml`](example.yaml). It's set up for a XIAO ESP32-C3 on
-   the XIAO RS485 board, so change the board and pins to match your hardware.
+   the XIAO RS485 board. Another XIAO (C6, S3, ...) only needs its board name, the pins are the same. Other
+   hardware needs its pins too.
 
 3. **Pick the packages you want** from the [table below](#packages) for the `files:` list, then flash. In
    `example.yaml` that's:
@@ -57,6 +58,10 @@ This project implements a Modbus server for Flexit ventilation systems using ESP
      # - packages/advanced.yaml
    ```
 
+4. **Restart the ventilation unit** (power off and on) with the ESP running. The CX60 only looks for panels when
+   it starts, so until then it doesn't poll the ESP and the settings stay unknown. If CX60 Connected stays off,
+   swap A and B, check the TX/RX pins, and that nothing else is at the ESP's address.
+
 ---
 
 ## Packages
@@ -74,7 +79,7 @@ pieces the packages share, you don't add those yourself.
 | [`diagnostics.yaml`](packages/diagnostics.yaml) | CX60 connected, fan type (EC/AC), heating type, controller SW version, week program active, home/away input, filter resets | Read only |
 | [`fan_speeds.yaml`](packages/fan_speeds.yaml) | Supply/extract fan % for MIN/NORMAL/MAX | EC fans only. Disabled by default |
 | [`fireplace.yaml`](packages/fireplace.yaml) | Fireplace mode (temporary MAX with custom fan speeds) | Needs `controls.yaml`. EC fans only |
-| [`humidity_boost.yaml`](packages/humidity_boost.yaml) | Humidity boost (temporary MAX when humidity spikes, e.g. a shower) | Needs `controls.yaml` and a humidity sensor of your own |
+| [`humidity_boost.yaml`](packages/humidity_boost.yaml) | Humidity boost (temporary MAX when humidity spikes, e.g. a shower): above its 1 h baseline, or a fast rise | Needs `controls.yaml` and a humidity sensor of your own |
 | [`co2.yaml`](packages/co2.yaml) | CO2 control around a target: stepped (MAX), proportional or PI (fan speeds) | Needs `controls.yaml` and a CO2 sensor of your own. The fan speed modes are EC fans only |
 | [`summer_cooling.yaml`](packages/summer_cooling.yaml) | Summer cooling (MAX when it is warm inside and cooler outside) | Needs `controls.yaml` |
 | [`computed.yaml`](packages/computed.yaml) | Heat recovery efficiency, heater power/energy, filter days remaining, combined alarm | Read only |
@@ -82,8 +87,8 @@ pieces the packages share, you don't add those yourself.
 | [`health.yaml`](packages/health.yaml) | The ESP's free RAM, largest free block and loop time | Diagnostic |
 | [`panel.yaml`](packages/panel.yaml) | A CI600 running the [replacement firmware](#ci600-panel-replacement-firmware): its settings in Home Assistant, notifications, pictures, your values on its screen | ESP32 only, ESP at address 1. Extras in [`packages/panel/`](packages/panel) |
 
-What each one does, with its entities and settings, is in [docs/packages.md](docs/packages.md). All settings are
-read back from the CX60, so changes made on a CI600 panel show up in Home Assistant as well (see
+What each one does beyond its entities' names, and their settings, is in [docs/packages.md](docs/packages.md).
+All settings are read back from the CX60, so changes made on a CI600 panel show up in Home Assistant as well (see
 [Saved settings and counters](#saved-settings-and-counters)).
 
 ### Customizing

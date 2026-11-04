@@ -2,6 +2,7 @@
 // and the fog, drawn the scene's own way in place of its still ones
 #pragma once
 #include "met_live.h"
+#include "met_live_land.h"
 
 namespace flexit::panel::met::live {
 
@@ -14,7 +15,7 @@ inline constexpr int SKY_POOL = ANIM_POOL - 144;
 struct TileCost {
   int start, row, each, slant;
 };
-inline constexpr TileCost TILE_COST[] = {{650, 1, 32, 13}, {930, 4, 76, 0}, {1400, 1, 123, 32}};
+inline constexpr TileCost TILE_COST[] = {{650, 1, 32, 13}, {930, 5, 78, 0}, {1400, 1, 123, 32}};
 // The bolt: to start with, and a row
 inline constexpr int BOLT_START = 100, BOLT_ROW = 4;
 // A cloud: fifths of its frame, and to start with
@@ -22,8 +23,8 @@ struct CloudCost {
   int fifths, start;
 };
 inline constexpr CloudCost CIRRUS_COST = {5, 330}, CUMULUS_COST = {6, 210};
-// The flag next to the clouds, and the far gulls with the lower ones
-inline constexpr int FLAG_BYTES = 600, GULLS_FAR_BYTES = 100;
+// The flag next to the clouds
+inline constexpr int FLAG_BYTES = 600;
 // Widths of the aurora's patches on the high and the low ribbon, what fits the pool on every night
 inline constexpr int AUR_HIGH_W = 52, AUR_LOW_W = 72;
 
@@ -33,7 +34,9 @@ struct Sky {
   float dens;                              // streaks or flakes per px
   int kind, slant;                         // 0 rain, 1 snow, 2 both, and their x per 8 rows
   decltype(Scene::bolt_x) bolt_x, bolt_y;  // the scene's bolt
+  uint8_t top[W];                          // the skyline it strikes behind
   int16_t shoot[6][3];                     // where a shooting star may start, and which way, x 0 for none
+  int16_t sat, sat_dy;                     // the row a satellite crosses from and how much higher it ends, -1 none
 };
 inline Sky SKY;
 
@@ -131,6 +134,7 @@ inline void prec_start(const Scene &s, int tw, int room) {
 inline void keep_bolt(const Scene &s) {
   memcpy(SKY.bolt_x, s.bolt_x, sizeof s.bolt_x);
   memcpy(SKY.bolt_y, s.bolt_y, sizeof s.bolt_y);
+  skyline(s, SKY.top);
 }
 // What the scene's bolt takes of the pool
 inline int bolt_bytes(const Scene &s) {
@@ -143,7 +147,16 @@ inline int bolt_bytes(const Scene &s) {
 inline uint32_t flash() {
   int x, y;
   unload("bolt");
-  add("bolt", bolt(SKY.bolt_x, SKY.bolt_y, (int) std::size(SKY.bolt_x), &x, &y));
+  Frames b = bolt(SKY.bolt_x, SKY.bolt_y, (int) std::size(SKY.bolt_x), &x, &y);
+  auto whole = b.draw;
+  b.draw = [whole, x, y, w = b.w, h = b.h](int f, const Canvas &c) {  // behind the town and the land, like the scene's
+    whole(f, c);
+    for (int yy = 0; yy < h; yy++)
+      for (int xx = 0; xx < w; xx++)
+        if (y + yy >= SKY.top[std::clamp(x + xx, 0, W - 1)])
+          c.px[yy * c.w + xx] = 0;
+  };
+  add("bolt", std::move(b));
   place("bolt", 0, x, y, {false, 0, 0});
   rounds("bolt", 0, 1);
   later(15000, [] { unload("bolt"); });
@@ -163,9 +176,8 @@ inline void thunderstorm(const Scene &s) {
   sometimes(minutes(3), 40000, flash);
 }
 
-// In a gale a copy fewer, for what blows by
+// Snow or light rain. In a gale a copy fewer, for what blows by
 inline void snowfall(const Scene &s) { prec_start(s, gale(s.at) ? 46 : 40, prec_room(s)); }
-inline void light_rain(const Scene &s) { prec_start(s, gale(s.at) ? 46 : 40, prec_room(s)); }
 
 // The clouds moved: the tiles go to their new bases, or are made again if they're too short now or the rain or wind
 // changed.
@@ -323,9 +335,7 @@ inline uint32_t shoot() {
   if (!c[0])
     return 0;
   int x = c[2] > 0 ? c[0] : c[0] + 40;  // the box from its start to where it goes out
-  place("shooting", 0, x, c[1], {true, 0, 0});
-  if (c[2] < 0)
-    flip("shooting", 0, true, false);
+  place_flipped("shooting", 0, x, c[1], c[2] < 0, {true, 0, 0});
   rounds("shooting", 0, 1);
   move("shooting", 0, x + c[2] * 40, c[1] + 15, 490);
   return 490;
@@ -346,21 +356,39 @@ inline void shoot_spots(const Scene &s) {
     row(s, y, px);
     for (int i = 0; i < 6; i++)
       for (int x = c[i][0]; c[i][0] && y >= c[i][1] && y < c[i][1] + 24 && x < c[i][0] + 64; x++)
-        if (px[x] != s.ix[C_SKY + band_of(y)] && px[x] != s.ix[C_DIM] && px[x] != s.ix[C_STAR])
+        if (!sky_px(s, px[x], y))
           c[i][0] = 0;
   }
 }
 
-// The sky turns: the stars sparkle where they are now, and shooting stars start where it's clear now
+// A satellite glides across the sky at 4 px/s, rising a little, a faint dot that flares up once. The ms it takes.
+inline uint32_t satellite() {
+  if (SKY.sat < 0)
+    return 0;
+  uint32_t ms = (W + 6) * 1000 / 4;
+  place("satellite", 0, -3, SKY.sat, {true});
+  rounds("satellite", 0, 1);
+  move("satellite", 0, W + 3, SKY.sat - SKY.sat_dy, (int) ms);
+  return gone_later(ms, "satellite");
+}
+
+// The sky turns: the stars sparkle where they are now, and shooting stars and satellites go where it's clear now
 inline void stars_turn(const Scene &s) {
   twinkle_stars(s);
   shoot_spots(s);
+  SKY.sat_dy = (int16_t) rnd(10, 40);
+  SKY.sat = (int16_t) sky_line(s, 3, 3, 50, 120, -SKY.sat_dy);
 }
 
-// The stars sparkle, and about every 5 minutes a shooting star, from where the sky is clear, never the moon
+// The stars sparkle, and about every 5 minutes a shooting star, from where the sky is clear, never the moon. Now and
+// then a satellite crosses, or by the cabin a fox trots by.
 inline void starry_night(const Scene &s) {
   stars_turn(s);
   sometimes(minutes(5), minutes(1), shoot);
+  bool cabin = s.cabin;
+  int y = std::min(s.cabin_y + 6, H - 9), stop = window_x(s) - 2;
+  visitors(minutes(8), minutes(1, 6), 2,
+           [=](int k) -> uint32_t { return k ? (cabin ? fox_by(y, stop) : 0) : satellite(); });
 }
 
 // ---- the clouds
@@ -369,7 +397,7 @@ inline void starry_night(const Scene &s) {
 inline uint32_t cloud_sig(const Scene &s, bool high) {
   uint32_t h = 1;
   for (int i = 0; i < s.nclouds; i++)
-    if (!s.cloud_layer[i] == high)
+    if (high_cloud(s, i) == high)
       h = h * 31 + (uint32_t) (s.cloud[i].x * 1000 + s.cloud[i].base * 8 + s.cloud[i].n);
   return h;
 }
@@ -394,13 +422,12 @@ inline Frames cloud(const Scene &s, int i, int *x, int *y) {
   return cumulus_cloud(c.e, c.n, c.top, c.base, c.shade, s.rgb[C_LIT + l], s.rgb[C_SHADE + l]);
 }
 
-// Whether the high clouds, or the middle and low ones, fit the panel as an animation each, next to the flag and
-// the gulls.
+// Whether the high clouds, or the middle and low ones, fit the panel as an animation each, next to the flag.
 inline bool clouds_fit(const Scene &s, bool high) {
   bool flag = s.at.flag_up && s.pole_x >= 0;
-  int n = 0, bytes = (flag ? FLAG_BYTES : 0) + (high ? 0 : GULLS_FAR_BYTES);
+  int n = 0, bytes = flag ? FLAG_BYTES : 0;
   for (int i = 0; i < s.nclouds; i++)
-    if (!s.cloud_layer[i] == high) {
+    if (high_cloud(s, i) == high) {
       int x, y;
       Frames sp = cloud(s, i, &x, &y);
       int frame = (sp.w + 1) / 2 * sp.h;
@@ -408,7 +435,7 @@ inline bool clouds_fit(const Scene &s, bool high) {
       bytes += frame * c.fifths / 5 + c.start;
       n++;
     }
-  return n <= 4 - flag - !high && bytes <= SKY_POOL;
+  return n <= 4 - flag && bytes <= SKY_POOL;
 }
 
 // The high clouds drift with the wind at 1 to 2 px/s, the higher ones slower, thinning and thickening on slow
@@ -430,18 +457,13 @@ inline void drift_clouds(const Scene &s, bool high) {
 }
 
 inline void high_clouds(const Scene &s) { drift_clouds(s, true); }
-
-// The clouds, and a gull or two far off
-inline void lower_clouds(const Scene &s) {
-  drift_clouds(s, false);
-  flock({}, {{(int) rnd(40, 280), HORIZON - 70, 2, 3, HORIZON - 100, HORIZON - 40},
-             {(int) rnd(40, 280), HORIZON - 50, 2, 3, HORIZON - 80, HORIZON - 25}});
-}
+inline void lower_clouds(const Scene &s) { drift_clouds(s, false); }
 
 // ---- the fog
 
 // Banks a little lighter than the scene's fog creep along its edges with the wind, the near ones bigger and
-// quicker, thickening and thinning on slow waves. Over the far hills, and the middle ones in thick fog.
+// quicker, thickening and thinning on slow waves. Over the far hills, and the middle ones in thick fog, behind what's
+// nearer.
 inline void valley_fog(const Scene &s) {
   uint32_t f = s.rgb[C_FOG];
   std::array<uint32_t, 3> cols = {mix(f, 0xFFFFFF, 0.35f), mix(f, 0xFFFFFF, 0.22f), mix(f, 0xFFFFFF, 0.1f)};
@@ -460,7 +482,7 @@ inline void valley_fog(const Scene &s) {
   for (int i = 0; i < 4; i++) {
     std::string name = i < 2 ? "fog0" : "fog1";
     int k = i % 2, h = i < 2 ? 12 : 9, y = (i < 2 && thick ? edge[1] : edge[0] + (i < 2) * 3) - h + 4;
-    place(name, k, AT[i] * W / 8 - (i < 2 ? 55 : 38), y);
+    place(name, k, AT[i] * W / 8 - (i < 2 ? 55 : 38), y, {.depth = i < 2 && thick ? D_MID_ON : D_SEA});
     if (k)
       flip(name, k, true, false);
     area(name, k, -130, 0, 450, H, "cross", "screen");

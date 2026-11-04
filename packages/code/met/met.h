@@ -1,7 +1,8 @@
 // met_scene.h as a panel picture. met.yaml calls fetch() for the forecast, poll() for its answer and redraw()
 // every few minutes so the sun and moon move. Only changed rows are sent to the panel. MET Norway is asked again
-// once its last answer has expired, with If-Modified-Since, in a task of its own so the bus is still answered, and
-// less often while it refuses or doesn't answer, see fetched() and unreachable().
+// once its last answer has expired, with If-Modified-Since, in a task of its own so the bus is still answered, soon
+// again after a server error and less often while it refuses or doesn't answer, see fetched() and unreachable(). The
+// forecast is kept through all of that until it runs out.
 #pragma once
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
@@ -9,6 +10,8 @@
 #include <freertos/task.h>
 #include <strings.h>
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -49,13 +52,16 @@ inline uint32_t not_before;   // no request before this (Unix time): the last an
 inline uint32_t backoff_s;    // doubles with each failure in a row
 inline bool answered;         // MET Norway has answered since boot
 inline uint8_t early_tries;   // quick retries before that
+inline bool retry_soon;       // one of those is due, tick() makes it
+inline constexpr uint32_t EARLY_RETRY_S = 30;
 inline char url[128];
 inline double lat, lon;
 inline int timeout_ms;  // http_request's
 inline std::string name;
-inline bool with_forecast;  // the Panel Weather Forecast switch
-inline Options options;     // set from met.yaml
-inline uint32_t pal[16];    // the scene's colours, for picture.h
+inline bool with_forecast;    // the Panel Weather Forecast switch
+inline Options options;       // set from met.yaml
+inline uint32_t pal[16];      // the scene's colours, for picture.h
+inline picture::Parts parts;  // and its parts
 
 // name's index in names, for met.yaml's selects. 0 if it's none of them
 template<size_t N> int option_of(const char *const (&names)[N], const char *name) {
@@ -107,10 +113,12 @@ struct Drawing {
   Scene scene;
   uint8_t row[W];  // the last row pixel() drew
   int row_y;
+  Palette colours;  // its colours counted, while built is still false
 };
 inline Drawing *drawing;
 inline Land *land;
-inline bool built;  // drawing has the scene for now
+inline bool built;     // drawing has the scene for now
+inline bool counting;  // drawing has it but its colours, see prepare()
 
 inline void free_drawing() {
   if (drawing) {
@@ -120,7 +128,7 @@ inline void free_drawing() {
     RAMAllocator<Drawing>().deallocate(drawing, 1);
   }
   drawing = nullptr;
-  built = false;
+  built = counting = false;
   if (land && picture::S.want != name) {
     RAMAllocator<Land>().deallocate(land, 1);
     land = nullptr;
@@ -132,7 +140,8 @@ inline bool new_drawing() {
   if (!picture::has_ram(sizeof(Drawing) + SPRITES * sizeof(Sprite) + ov_bytes + (land ? 0 : sizeof(Land)),
                         sizeof(Drawing)))
     return false;
-  if (!land && (land = RAMAllocator<Land>().allocate(1)))
+  bool new_land = !land;
+  if (new_land && (land = RAMAllocator<Land>().allocate(1)))
     land->made = false;
   Drawing *c = RAMAllocator<Drawing>().allocate(1);
   Sprite *sprite = RAMAllocator<Sprite>().allocate(SPRITES);
@@ -141,6 +150,10 @@ inline bool new_drawing() {
     RAMAllocator<Drawing>().deallocate(c, 1);
     RAMAllocator<Sprite>().deallocate(sprite, SPRITES);
     RAMAllocator<uint8_t>().deallocate(ov, ov_bytes);
+    if (new_land) {
+      RAMAllocator<Land>().deallocate(land, 1);
+      land = nullptr;
+    }
     return false;
   }
   c->scene.sprite = sprite;
@@ -150,13 +163,13 @@ inline bool new_drawing() {
   return true;
 }
 
-// Builds the scene for now if it isn't. False without the time or the RAM, picture.h asks again a second later.
-inline bool draw() {
-  if (built)
-    return true;
+// Builds the scene for now and starts counting its colours. False without the time or the RAM.
+inline bool begin() {
   ESPTime t = id(flexit_panel_time).now();
-  if (!t.is_valid())
+  if (!t.is_valid()) {
+    picture::S.waiting = "waiting for the time from Home Assistant";
     return false;
+  }
   if (drawing && !drawing->scene.ov != !with_forecast)
     free_drawing();  // the forecast went on or off
   if (!drawing && !new_drawing()) {
@@ -171,20 +184,65 @@ inline bool draw() {
   options.frame++;
   Scene &s = drawing->scene;
   build(s, weather, lat, lon, (uint32_t) t.timestamp, with_forecast, utc_offset, options);
-  s.live = live::leaves_out(s);                  // what the animations that fit it draw themselves
-  const picture::Pic &shown = picture::S.shown;  // the panel's palette, if it's this picture
-  palette(s, shown.name == name && shown.format == PIC_PALETTE ? shown.pal : nullptr);
+  s.live = live::leaves_out(s);  // what the animations that fit it draw themselves
+  drawing->colours.start(s);
+  counting = true;
+  return true;
+}
+
+// Once the colours are counted: the 16 of them, keeping the panel's where they're the same if it's this picture
+inline void finish() {
+  Scene &s = drawing->scene;
+  const picture::Pic &shown = picture::S.shown;
+  drawing->colours.end(s, shown.name == name && shown.format == PIC_PALETTE ? shown.pal : nullptr);
   live::apply(s);
   memcpy(pal, s.pal, sizeof pal);
+  parts = parts_of(s);
   drawing->row_y = -1;
+  counting = false;
   built = true;
+}
+
+inline constexpr int COUNT_ROWS = 8;    // rows prepare() counts between looks at the time
+inline uint32_t begin_us = UINT32_MAX;  // what begin() took, as fits() has it
+
+// picture.h's prepare: the scene for now built, then its colours counted a few rows at a time until deadline_us.
+// True once there's nothing more to do now, built or not to be built yet, which draw() then says.
+inline bool prepare(uint32_t deadline_us) {
+  if (built)
+    return true;
+  if (!counting) {
+    if (!fits(deadline_us, begin_us, true))
+      return false;
+    uint32_t t0 = micros();
+    if (!begin())
+      return true;
+    begin_us = micros() - t0;
+  }
+  while (before(deadline_us))
+    if (drawing->colours.count(drawing->scene, COUNT_ROWS)) {
+      finish();
+      return true;
+    }
+  return false;
+}
+
+// The scene for now, all of it at once if prepare() hasn't. False without the time or the RAM, picture.h asks
+// again a second later.
+inline bool draw() {
+  if (built)
+    return true;
+  if (!counting && !begin())
+    return false;
+  drawing->colours.count(drawing->scene, H);
+  finish();
   return true;
 }
 
 // The time, the weather or a setting changed. Drawn again if it's the panel's picture.
 inline void redraw() {
   send_now();
-  built = false;
+  built = counting = false;
   picture::changed(name);
 }
 
@@ -232,13 +290,16 @@ inline void back_off(uint32_t first, uint32_t most) {
 }
 
 // No answer, or one cut off: more likely our own network than MET Norway, so ten minutes and up to an hour.
-// Right after boot the network often isn't quite there yet, so the first few tries just go again at the next check.
+// Right after boot the network often isn't quite there yet and the ESP is busy, so the first few tries go again
+// EARLY_RETRY_S later rather than at the next check.
 inline void unreachable() {
   if (!answered && early_tries < 3) {
     early_tries++;
-    not_before = 0;
+    not_before = now_s() + EARLY_RETRY_S;
+    retry_soon = true;
   } else {
     back_off(600, 3600);
+    retry_soon = false;
   }
   on_status("Couldn't reach MET Norway");
 }
@@ -251,21 +312,41 @@ struct Fetch {
   int timeout_ms;
   int status = 0;  // 0 = no answer
   Weather w;
-  std::string last_modified, expires;
+  std::string last_modified, expires, retry_after;
   unsigned stack_left = 0;
 };
 
+// Retry-After's seconds from now, given as seconds or as an HTTP date. 0 without one.
+inline uint32_t retry_after_s(const std::string &v, uint32_t now) {
+  if (v.empty())
+    return 0;
+  if (isdigit((unsigned char) v[0]))
+    return (uint32_t) strtoul(v.c_str(), nullptr, 10);
+  uint32_t t = http_date(v);
+  return t > now ? t - now : 0;
+}
+
 // api.met.no's answer, 2xx with the forecast read from it into f.w, or 304 if it hasn't changed. 203 is a product
-// that's deprecated, its data is still good. Refused, it waits an hour, then twice as long each time up to 12.
+// that's deprecated, its data is still good. A server error, 502 or 503 when it's busy, or an answer without a
+// forecast in it is usually over soon: it asks again a minute later, then twice as long each time up to half an hour.
+// Refused, it waits an hour, then twice as long each time up to 12. Longer if Retry-After says so.
 inline void fetched(const Fetch &f) {
   answered = true;
+  retry_soon = false;
   bool ok = f.status >= 200 && f.status < 300 && f.w.ok;
+  uint32_t now = now_s();
   if (ok || f.status == 304) {
     backoff_s = 0;
-    uint32_t now = now_s(), e = http_date(f.expires);
+    uint32_t e = http_date(f.expires);
     not_before = e ? std::max(e, now + 600) : now + 3600;  // at least 10 min, in case our clock is off
   } else {
-    back_off(3600, 12 * 3600);  // 429 is too many requests, 403 refused
+    if (f.status >= 500 || f.status < 300) {
+      back_off(60, 1800);
+      retry_soon = true;  // tick() asks when it's time, not the next check
+    } else {
+      back_off(3600, 12 * 3600);  // 429 is too many requests, 403 refused
+    }
+    not_before = std::max(not_before, now + std::min<uint32_t>(retry_after_s(f.retry_after, now), 12 * 3600));
   }
   if (f.status == 304) {
     ESP_LOGI("met", "The forecast hasn't changed (HTTP 304)");
@@ -275,8 +356,10 @@ inline void fetched(const Fetch &f) {
     ESP_LOGW("met", "MET Norway says this product is deprecated");
   }
   if (!ok) {
-    ESP_LOGW("met", "No forecast from MET Norway (HTTP %d)", f.status);
-    on_status("No forecast (HTTP " + std::to_string(f.status) + ")");
+    ESP_LOGW("met", "No forecast from MET Norway (HTTP %d), asking again in %u s", f.status,
+             (unsigned) (not_before - now));
+    on_status(std::string(weather.ok ? "Kept the last forecast" : "No forecast") + " (HTTP " +
+              std::to_string(f.status) + ")");
     return;
   }
   const Weather &w = f.w;
@@ -300,6 +383,8 @@ inline esp_err_t on_header(esp_http_client_event_t *e) {
       f.last_modified = e->header_value;
     else if (!strcasecmp(e->header_key, "expires"))
       f.expires = e->header_value;
+    else if (!strcasecmp(e->header_key, "retry-after"))
+      f.retry_after = e->header_value;
   }
   return ESP_OK;
 }
@@ -345,6 +430,7 @@ inline void request(void *arg) {
   }
   f.stack_left = uxTaskGetStackHighWaterMark(nullptr);
   fetch_done.store(true);  // f is the loop's from here on
+  requests--;
   vTaskDelete(nullptr);
 }
 
@@ -360,8 +446,10 @@ inline void fetch() {
     f->timeout_ms = timeout_ms;
     fetch_done.store(false);
     fetching = f;
+    requests++;
     if (xTaskCreate(request, "met", STACK, f, 1, nullptr) == pdPASS)
       return;
+    requests--;
     fetching = nullptr;
     f->~Fetch();
     ram.deallocate(f, 1);
@@ -384,6 +472,15 @@ inline void poll() {
     unreachable();
   f->~Fetch();
   RAMAllocator<Fetch>().deallocate(f, 1);
+}
+
+// Every second from met.yaml: the answer once the task has it, and an early retry when it's time
+inline void tick() {
+  poll();
+  if (retry_soon && !fetching && due()) {
+    retry_soon = false;
+    fetch();
+  }
 }
 
 // From met.yaml's on_boot, with http_request's timeout
@@ -410,12 +507,14 @@ inline void setup(double latitude, double longitude, const char *picture, const 
     h = H;
     return draw();
   };
+  s.prepare = prepare;
   s.pixel = pixel;
   s.pal = pal;
   s.row = [](int y, uint8_t *idx) {
     if (drawing)
       row(drawing->scene, y, idx);
   };
+  s.parts = [] { return parts; };
   s.done = free_drawing;
   s.encoding = picture::encoding_of(encoding);
   s.quality = picture::quality_of(quality);

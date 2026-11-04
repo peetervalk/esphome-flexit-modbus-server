@@ -3,6 +3,7 @@
 What each package does, and its entities and settings. The list is in the [README](../README.md#packages), the
 panel's packages in [panel.md](panel.md).
 
+- [Controls](#controls)
 - [Boosts](#boosts)
 - [Fireplace mode](#fireplace-mode)
 - [Humidity boost](#humidity-boost)
@@ -10,6 +11,18 @@ panel's packages in [panel.md](panel.md).
 - [Summer cooling](#summer-cooling)
 - [Computed sensors](#computed-sensors)
 - [Advanced settings](#advanced-settings)
+
+## Controls
+
+`controls.yaml` does what the CI600's main menus do.
+
+- **Set Mode** and **Temperature** are the mode and the setpoint.
+- **Supply Air Control** on holds the supply air at the setpoint. Off holds the room there, read by the extract
+  air sensor, which it turns on like the stock panel does. Temperature Supply Min and Max keep the supply air
+  between them meanwhile.
+- **Start Max Timer** runs MAX for Max Timer Minutes, **Stop Max Timer** ends it early.
+- **Reset Filter Interval** after changing the filters starts Filter Change Interval's days again.
+- **Clear Alarms** clears the CX60's alarms.
 
 ## Boosts
 
@@ -48,7 +61,8 @@ someone changes a setting by hand meanwhile.
 ```
 
 An automation in Home Assistant that changes the unit's settings (fan speeds and so on) makes real changes
-instead. Each one is written to flash right away, and the automation has to put the old value back itself.
+instead. Each one is written to flash within a cycle of the unit, and the automation has to put the old value back
+itself.
 Changing them often means writing the flash often, which matters most on an ESP8266.
 
 ## Fireplace mode
@@ -119,18 +133,25 @@ sensor:
 Graph `Humidity Above Baseline` for a few days to pick a trigger delta. After a boost that ran into the
 maximum runtime it waits for humidity to come back down before it boosts again.
 
+A shower right after another one barely moves the humidity above the baseline, which is still up from the
+first. For that there is the rise trigger: it boosts when the humidity has risen that much within the last
+`flexit_humidity_rise_minutes` (substitution, default 5), and is above the release delta. It is off until you
+set it, graph `Humidity Rise` for a while first to pick a number.
+
 | Entity | Default | What it does |
 |---|---|---|
 | `Humidity Boost` | off | On while boosting. Can also be turned on by hand, it then ends like any other boost |
 | `Humidity Boost Enable` | on | Off means it never starts by itself |
 | `Humidity Boost Trigger Delta` | 8 % | Starts when humidity is this far above the baseline |
 | `Humidity Boost Release Delta` | 3 % | Ends when humidity is back within this of the baseline |
+| `Humidity Boost Rise Trigger` | 0 % | Also starts when humidity rises this much within the rise minutes. 0 = off |
 | `Humidity Boost Release Minutes` | 5 min | How long it has to stay there before the boost ends. *Hidden* |
 | `Humidity Boost Min Minutes` | 5 min | Shortest boost |
 | `Humidity Boost Max Minutes` | 45 min | Longest boost, in case humidity never comes back down |
 | `Humidity Boost Cooldown Minutes` | 15 min | Pause after a boost before the next can start. *Hidden* |
 | `Humidity Baseline` | | The normal humidity it compares against |
 | `Humidity Above Baseline` | | Humidity now minus the baseline |
+| `Humidity Rise` | | Humidity now minus the lowest in the rise minutes |
 
 ## CO2 control
 

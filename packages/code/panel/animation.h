@@ -1,7 +1,9 @@
 // Screensaver animations from animation.yaml. All frames share 16 colours, one transparent if any pixel is, and
 // each frame after the first is the deflated rectangle that changed. The panel keeps up to ANIM_SLOTS of them in
-// 6 KB and shows each in up to ANIM_PLACES places, the copies of one in step unless a copy gets a frame of its own.
+// ANIM_POOL and shows each in up to ANIM_PLACES places, the copies of one in step unless a copy gets a frame of
+// its own.
 #pragma once
+#include <strings.h>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -56,10 +58,11 @@ struct Copy {
   int16_t x = 0, y = 0;
   bool own = false;  // a frame of its own, out of step with the others
   uint8_t start = 0;
-  int fade = -1;        // ms it fades in and out, -1 for the animation's
-  std::string doing;    // how it moves, for the status
-  uint16_t rounds = 0;  // to the end of, 0 = on and on
-  uint8_t tag = 0;      // of its ANIM_ROUNDS, the panel's ANIM_GONE has it
+  uint8_t depth = ANIM_NEAREST;  // K_ANIM_DEPTH's, sent with its PLACE
+  int fade = -1;                 // ms it fades in and out, -1 for the animation's
+  std::string doing;             // how it moves, for the status
+  uint16_t rounds = 0;           // to the end of, 0 = on and on
+  uint8_t tag = 0;               // of its ANIM_ROUNDS, the panel's ANIM_GONE has it
   // What it was told since it was placed, the last of each kind and channel, sent again after a panel restart
   struct Told {
     uint16_t key;
@@ -104,7 +107,11 @@ struct Work {
   int frames = 0;                           // to make, a repeating GIF's first round only
   size_t last = 0;                          // the last record in data, 0 = only the first frame's
   std::vector<uint8_t> frame, prev, first;  // 2 pixels per byte
-  std::vector<uint8_t> lut;                 // colour at 4 bits per channel -> palette index
+  std::vector<uint8_t> lut;                 // colour at 4 bits per channel -> palette index, 0xFF until looked up
+  std::vector<uint32_t> enc, tok;           // pdeflate's work for a frame, see pdeflate_work_t
+  std::vector<uint16_t> rest;
+  int colours = 0;                  // in the palette
+  uint32_t record_us = UINT32_MAX;  // what a record takes, as fits() has it
 };
 inline Work W;
 
@@ -166,15 +173,16 @@ inline void status(const std::string &s) { panel::status(id(panel_animation_stat
 inline bool opaque(uint32_t c) { return c >> 24 >= 128; }  // 0xAARRGGBB, at least half opaque
 
 // 0xAARRGGBB of the animation being made. At half size the 2x2 average, transparent if 3 or more of the 4 are.
+// The column that pads the width to even repeats the last one, so it doesn't count as transparent.
 inline uint32_t px(int f, int x, int y) {
   const Source &s = *W.a->src;
   if (!W.a->half)
-    return x < s.w && y < s.h ? s.pixel(f, x, y) : 0;
+    return y < s.h ? s.pixel(f, std::min(x, s.w - 1), y) : 0;
   uint32_t r = 0, g = 0, b = 0, n = 0;
   for (int dy = 0; dy < 2; dy++)
     for (int dx = 0; dx < 2; dx++) {
-      int sx = 2 * x + dx, sy = 2 * y + dy;
-      uint32_t c = sx < s.w && sy < s.h ? s.pixel(f, sx, sy) : 0;
+      int sx = std::min(2 * x + dx, s.w - 1), sy = 2 * y + dy;
+      uint32_t c = sy < s.h ? s.pixel(f, sx, sy) : 0;
       if (!opaque(c))
         continue;
       r += c >> 16 & 255;
@@ -193,6 +201,9 @@ inline void drop_work() {
   drop(W.frame);
   drop(W.prev);
   drop(W.first);
+  drop(W.enc);
+  drop(W.tok);
+  drop(W.rest);
 }
 
 // Stops making or sending the one in hand. What was made of one being made goes.
@@ -231,11 +242,11 @@ inline size_t data_max() {
 }
 
 // Whether the ESP has the RAM to make it: the colour counts, then the colour table, three frames, the records and
-// what pdeflate takes for a frame. Without exceptions a failed allocation restarts the ESP.
+// pdeflate's work for a frame, in three blocks. Without exceptions a failed allocation restarts the ESP.
 inline bool has_ram() {
-  size_t f = W.a->frame_bytes();
-  return panel::has_ram(std::max<size_t>(COUNT_RAM, BINS + 3 * f + data_max() + PDEFLATE_HEAP(f)),
-                        std::max<size_t>({BINS * 4, data_max(), PDEFLATE_HEAP(0), 4 * f + 4}));
+  size_t f = W.a->frame_bytes(), work = PDEFLATE_ENC + PDEFLATE_TOK(f) + PDEFLATE_REST(f);
+  return panel::has_ram(std::max<size_t>(COUNT_RAM, BINS + 3 * f + data_max() + work),
+                        std::max<size_t>({BINS * 4, data_max(), PDEFLATE_ENC, PDEFLATE_TOK(f)}));
 }
 
 // ---- the link's messages
@@ -324,6 +335,13 @@ inline bool own_room(const Anim &a, const Copy *c) {
 
 inline int fade_of(const Anim &a, const Copy &c) { return c.fade >= 0 ? c.fade : a.src->fade_ms; }
 
+inline void send_depth(const Copy &c) {
+  uint8_t m[ANIM_DEPTH_LEN];
+  m[ANIM_MSG_PLACE] = c.place;
+  m[ANIM_DEPTH_DEPTH] = c.depth;
+  link::send(K_ANIM_DEPTH, m, sizeof m);
+}
+
 // Puts a copy on the panel with what it was told
 inline void send_place(Anim &a, Copy &c) {
   uint8_t m[ANIM_PLACE_LEN];
@@ -338,6 +356,8 @@ inline void send_place(Anim &a, Copy &c) {
   m[ANIM_PLACE_START] = c.start;
   plink_put16(m + ANIM_PLACE_FADE, (uint16_t) fade_of(a, c));
   link::send(K_ANIM_PLACE, m, sizeof m);
+  if (c.depth != ANIM_NEAREST)
+    send_depth(c);
   c.placed = true;
   for (auto &t : c.told)
     send_told(t);
@@ -373,7 +393,6 @@ inline bool start() {
     a.half = true;
   }
   W.hist.assign(BINS, 0);
-  W.lut.resize(BINS);
   W.hash.clear();
   W.sum = FNV_START;
   W.any_transp = false;
@@ -383,8 +402,7 @@ inline bool start() {
   return true;
 }
 
-// Counts the colours of a row or a few, and at the end of a frame its hash. After the last frame, builds the
-// palette.
+// Counts the colours of a row or a few, and at the end of a frame its hash
 inline void count() {
   Anim &a = *W.a;
   uint32_t h = W.sum;
@@ -403,8 +421,12 @@ inline void count() {
   W.y = 0;
   W.hash.push_back(W.sum);
   W.sum = FNV_START;
-  if (++W.f < a.src->frames)
-    return;
+  W.f++;
+}
+
+// After the last frame is counted: the palette, at once, and the RAM to make the frames
+inline void palette() {
+  Anim &a = *W.a;
   int n = a.src->frames;
   W.frames = n;
   const std::vector<uint16_t> &d = a.src->delays;
@@ -415,16 +437,21 @@ inline void count() {
   drop(W.hash);
   std::vector<uint16_t> bins;
   memset(a.pal, 0, sizeof a.pal);
-  int colours = median_cut(W.hist, W.any_transp ? 15 : 16, a.pal, bins);
+  W.colours = median_cut(W.hist, W.any_transp ? 15 : 16, a.pal, bins);
   a.transp = W.any_transp ? 15 : ANIM_OPAQUE;
-  fill_lut(W.lut, W.hist, a.pal, colours);
   drop(W.hist);
+  drop(bins);                // the lut takes their place, so has_ram()'s peak holds
+  W.lut.assign(BINS, 0xFF);  // filled as make() meets the colours
   a.data.clear();
   a.data.reserve(data_max());  // so it never moves
   W.frame.resize(a.frame_bytes());
   W.prev.resize(a.frame_bytes());
+  W.enc.resize(PDEFLATE_ENC / 4);
+  W.tok.resize(PDEFLATE_TOK(a.frame_bytes()) / 4);
+  W.rest.resize((PDEFLATE_REST(a.frame_bytes()) + 1) / 2);
   W.f = 0;
   W.last = 0;
+  W.record_us = UINT32_MAX;
   W.phase = MAKE;
 }
 
@@ -452,7 +479,9 @@ inline bool record(const std::vector<uint8_t> *from, const std::vector<uint8_t> 
     if (at + most > a.data.capacity())
       return true;  // it would move, a peak has_ram() didn't count
     a.data.resize(at + most);
-    unsigned n = plink_anim_record(from ? from->data() : nullptr, to.data(), a.w, a.h, delay, a.data.data() + at);
+    pdeflate_work_t work = {W.enc.data(), W.tok.data(), W.rest.data()};
+    unsigned n =
+        plink_anim_record_in(&work, from ? from->data() : nullptr, to.data(), a.w, a.h, delay, a.data.data() + at);
     a.data.resize(at + n);
     if (!n)
       return false;
@@ -498,21 +527,33 @@ inline void made(bool ok, size_t left) {
   status("Sending " + a.name);
 }
 
+// The palette index of colour c, found the first time it comes up
+inline uint8_t index_of(uint32_t c) {
+  uint8_t &i = W.lut[bin(c)];
+  if (i == 0xFF)
+    i = (uint8_t) nearest(bin_rgb(bin(c)), W.a->pal, W.colours);
+  return i;
+}
+
 // Maps a row of the frame or a few to the palette. Once the frame is in, adds its record, and after the last frame
-// the one back to the first.
-inline void make() {
+// the one back to the first. A record goes in one go, so it waits for the next slice unless this one is fresh or
+// has the time the last record took. False when it waits.
+inline bool make(uint32_t deadline_us, bool fresh) {
   Anim &a = *W.a;
   if (W.y < a.h) {
     for (int n = 0; n < ROWS_PX && W.y < a.h; n += a.w, W.y++) {
       uint8_t *row = W.frame.data() + (size_t) W.y * (a.w / 2);
       for (int x = 0; x < a.w; x++) {
         uint32_t c = px(W.f, x, W.y);
-        uint8_t i = opaque(c) ? W.lut[bin(c)] : a.transp;
+        uint8_t i = opaque(c) ? index_of(c) : a.transp;
         row[x / 2] = (uint8_t) (x & 1 ? row[x / 2] | i : i << 4);
       }
     }
-    return;
+    return true;
   }
+  if (!fits(deadline_us, W.record_us, fresh))
+    return false;
+  uint32_t t0 = micros();
   W.y = 0;
   size_t left = room();
   bool ok = record(W.f ? &W.prev : nullptr, W.frame, frame_ms(*a.src, W.f));
@@ -524,6 +565,9 @@ inline void make() {
     ok = record(&W.prev, W.first, frame_ms(*a.src, 0), true);
   if (!ok || last || a.frame_bytes() + a.data.size() > left)
     made(ok, left);
+  uint32_t us = micros() - t0;  // a frame that changed little goes quicker, the next may not
+  W.record_us = W.record_us == UINT32_MAX ? us : std::max(us, W.record_us / 4 * 3);
+  return true;
 }
 
 // The header once the link is free, then the records as it has room until deadline_us, then END
@@ -561,7 +605,7 @@ inline void done() {
   status(shown());
 }
 
-// The panel's K_PIC_ACK = status << 24 | id << 16 | bytes received, from panel.h
+// The panel's K_PIC_ACK = status << 24 | id << 16 | bytes received, see plink_keys.h
 inline void ack(uint32_t v) {
   if (W.phase != SEND || !W.t.answers(v))
     return;  // for a picture or an earlier transfer
@@ -612,13 +656,13 @@ inline int free_place(const std::string &name) {
   return -1;
 }
 
-// Copy i of a, made if it wasn't there. nullptr if the panel has no place left for it.
-inline Copy *copy_of(Anim &a, int i) {
+// Copy i of a, made if it wasn't there, at place at if that's free. nullptr if the panel has no place left for it.
+inline Copy *copy_of(Anim &a, int i, int at = -1) {
   if ((int) a.copies.size() <= i)
     a.copies.resize(i + 1);
   Copy &c = a.copies[i];
   if (!c.used) {
-    int p = free_place(a.name);
+    int p = at >= 0 ? at : free_place(a.name);
     if (p < 0)
       return nullptr;
     c = Copy();
@@ -739,25 +783,27 @@ inline void switched_on(const std::string &name) {
 
 // panel_place_animation: copy i of name at x, y, which can be off the screen, own = a frame of its own started start
 // frames in. Shows the animation if it isn't yet, a failed one is tried again. fade: ms it fades in and out, -1
-// for the animation's.
-inline void place(const std::string &name, int i, int x, int y, bool own, int start, int fade = -1) {
+// for the animation's. depth: K_ANIM_DEPTH's. at: the place it takes if it's free. False if it isn't placed.
+inline bool place(const std::string &name, int i, int x, int y, bool own, int start, int fade = -1,
+                  uint8_t depth = ANIM_NEAREST, int at = -1) {
   if (i < 0 || i >= ANIM_PLACES) {
     ESP_LOGW("panel", "Animation %s: copy %d isn't one of 0 to %d", name.c_str(), i, ANIM_PLACES - 1);
-    return;
+    return false;
   }
   Anim *a = want(name);
   if (!a)
-    return;
+    return false;
   if (own && a->state == SENT && !own_room(*a, i < (int) a->copies.size() ? &a->copies[i] : nullptr))
-    return;
-  Copy *c = copy_of(*a, i);
+    return false;
+  Copy *c = copy_of(*a, i, at);
   if (!c)
-    return;
+    return false;
   c->x = clamp16(x);
   c->y = clamp16(y);
   c->own = own;
   c->fade = std::min(65535, fade);
   c->start = (uint8_t) std::clamp(start, 0, 255);
+  c->depth = depth;
   c->doing.clear();
   c->told.clear();
   c->rounds = 0;
@@ -765,6 +811,7 @@ inline void place(const std::string &name, int i, int x, int y, bool own, int st
   if (a->state == SENT)
     send_place(*a, *c);
   status(shown());
+  return true;
 }
 
 // Copy i of name's animation and the animation, nulls if it isn't shown. what is the action, panel_<what>_animation,
@@ -791,11 +838,41 @@ inline void remove(const std::string &name, int i, int fade = -1) {
   status(shown());
 }
 
-// Which of names s is, or -1 with a warning from panel_<what>_animation
+// Copy i of name goes to depth, K_ANIM_DEPTH's
+inline void depth(const std::string &name, int i, uint8_t d) {
+  auto [a, c] = copy_for(name, i);
+  if (!c || c->depth == d)
+    return;
+  c->depth = d;
+  if (a->state == SENT && c->placed)
+    send_depth(*c);
+}
+
+// Copy i of from becomes copy i of to at x, y, at its depth. When both are on the panel to's PLACE goes over from's
+// place, so nothing shows between them, else from goes at once and to shows when it's in.
+inline void swap(const std::string &from, int i, const std::string &to, int x, int y, bool own, int start) {
+  auto [a, c] = copy_for(from, i);
+  Anim *b = want(to);
+  if (!c || !b) {
+    remove(from, i, 0);
+    place(to, i, x, y, own, start, 0);
+    return;
+  }
+  Copy was = *c;
+  bool over = a->state == SENT && was.placed && b->state == SENT && !copy_for(to, i).second;
+  if (over)
+    *c = Copy();
+  else
+    remove(from, i, 0);
+  if (!place(to, i, x, y, own, start, 0, was.depth, over ? was.place : -1) && over)
+    send_clear(ANIM_PLACE_BIT | was.place, 0);
+}
+
+// Which of names s is, in any case, or -1 with a warning from panel_<what>_animation
 template<size_t N> int option(const char *const (&names)[N], const std::string &s, const char *what) {
   std::string all;
   for (size_t i = 0; i < N; i++) {
-    if (s == names[i])
+    if (!strcasecmp(s.c_str(), names[i]))
       return (int) i;
     all += (i ? ", " : "") + std::string(names[i]);
   }
@@ -1047,10 +1124,12 @@ inline void loop(uint32_t deadline_us) {
     if (W.phase == IDLE)
       return;
   }
-  while (W.phase == COUNT && before(deadline_us))
+  while (W.phase == COUNT && W.f < W.a->src->frames && before(deadline_us))
     count();
-  while (W.phase == MAKE && before(deadline_us))
-    make();
+  if (W.phase == COUNT && W.f == W.a->src->frames && fits(deadline_us, UINT32_MAX, true))
+    palette();
+  for (bool fresh = true; W.phase == MAKE && before(deadline_us) && make(deadline_us, fresh); fresh = false) {
+  }
   if (W.phase == SEND)
     send(deadline_us);
 }

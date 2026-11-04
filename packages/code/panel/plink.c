@@ -43,8 +43,8 @@ unsigned plink_pack_row(const uint8_t *in, unsigned n, uint8_t *out) {
   return o;
 }
 
-unsigned plink_anim_record(const uint8_t *prev, const uint8_t *cur, unsigned w, unsigned h, uint8_t delay,
-                           uint8_t *out) {
+unsigned plink_anim_record_in(const pdeflate_work_t *work, const uint8_t *prev, const uint8_t *cur, unsigned w,
+                              unsigned h, uint8_t delay, uint8_t *out) {
   unsigned rb = w / 2, x0 = rb, x1 = 0, y0 = h, y1 = 0;
   for (unsigned y = 0; y < h; y++)
     for (unsigned x = 0; x < rb; x++)
@@ -63,9 +63,17 @@ unsigned plink_anim_record(const uint8_t *prev, const uint8_t *cur, unsigned w, 
   out[ANIM_RECORD_H] = (uint8_t) (y1 - y0);
   if (y0 == y1)
     return ANIM_RECORD_HEAD;
-  uint32_t size = (x1 - x0) * (y1 - y0),
-           n = pdeflate(cur + y0 * rb + x0, x1 - x0, rb, size, out + ANIM_RECORD_HEAD, PDEFLATE_BOUND(size));
+  uint32_t size = (x1 - x0) * (y1 - y0), n;
+  if (work)
+    n = pdeflate_in(work, cur + y0 * rb + x0, x1 - x0, rb, size, out + ANIM_RECORD_HEAD, PDEFLATE_BOUND(size));
+  else
+    n = pdeflate(cur + y0 * rb + x0, x1 - x0, rb, size, out + ANIM_RECORD_HEAD, PDEFLATE_BOUND(size));
   return n ? ANIM_RECORD_HEAD + n : 0;
+}
+
+unsigned plink_anim_record(const uint8_t *prev, const uint8_t *cur, unsigned w, unsigned h, uint8_t delay,
+                           uint8_t *out) {
+  return plink_anim_record_in(NULL, prev, cur, w, h, delay, out);
 }
 
 void plink_put_palette(uint8_t *b, const uint32_t *pal) {
@@ -124,15 +132,22 @@ int plink_kind(uint16_t key) {
     case K_PIC_CLEAR:
     case K_ANIM_CLEAR:
     case K_ANIM_GONE:
+    case K_SHOT:
+    case K_SHOT_DONE:
       return PLINK_EVENT;
     case K_NOTIFY:
     case K_PIC_BEGIN:
     case K_PIC_PATCH:
     case K_PIC_DATA:
+    case K_PIC_PART:
     case K_ANIM_BEGIN:
+    case K_ANIM_DEPTH:
+    case K_LOG:
       return PLINK_BYTES;
   }
   if (key >= K_ANIM_FRAMES && key <= K_ANIM_ROUNDS)
+    return PLINK_BYTES;
+  if (key >= K_SAVER_LINE && key < K_SAVER_LINE + SAVER_LINES)
     return PLINK_BYTES;
   if (key >= K_ITEM_DEF && key < K_ITEM_HELP + 0x40)  // ESP items, 0x40 keys a kind: all bytes but the values
     return K_ITEM_KIND(key) == K_ITEM_VALUE ? PLINK_VALUE : PLINK_BYTES;

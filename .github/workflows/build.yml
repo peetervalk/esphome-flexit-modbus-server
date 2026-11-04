@@ -16,6 +16,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The ESP-ModbusRTUServer branch the component is tested and built against: dev with dev, since a change there goes
+  # to its dev first, main for everything else, pull requests included
+  MODBUS_REF: ${{ github.ref_name == 'dev' && 'dev' || 'main' }}
+
 jobs:
   format:
     runs-on: ubuntu-latest
@@ -43,42 +48,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: The panel updater's probe
-        run: |
-          g++ -std=gnu++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/stubs -Ipackages/code \
-            tests/update_test.cpp packages/code/panel/update.cpp packages/code/panel/pbus.c -o update_test
-          ./update_test
-
       - uses: actions/checkout@v7
         with:
           repository: MSkjel/ESP-ModbusRTUServer
+          ref: ${{ env.MODBUS_REF }}
           path: modbus-library
 
-      - name: The component on the bus
-        run: |
-          g++ -std=gnu++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
-            -Itests/stubs -Ipackages/code -Iesphome/components/flexit_modbus_server -Imodbus-library tests/server_test.cpp \
-            esphome/components/flexit_modbus_server/flexit_modbus_server.cpp modbus-library/ModbusRTUServer.cpp \
-            packages/code/panel/pbus.c -o server_test
-          ./server_test
-
-      - name: The packages that change the CX60 for a while, across reboots
-        run: |
-          g++ -std=gnu++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
-            -Itests/stubs -Ipackages/code -Iesphome/components/flexit_modbus_server -Imodbus-library tests/restart_test.cpp \
-            esphome/components/flexit_modbus_server/flexit_modbus_server.cpp modbus-library/ModbusRTUServer.cpp \
-            packages/code/panel/pbus.c -o restart_test
-          ./restart_test
-
-      - name: Humidity boost and summer cooling, when they start and stop
-        run: |
-          for t in humidity_boost_test summer_cooling_test; do
-            g++ -std=gnu++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
-              -Itests/stubs -Ipackages/code -Iesphome/components/flexit_modbus_server -Imodbus-library tests/$t.cpp \
-              esphome/components/flexit_modbus_server/flexit_modbus_server.cpp modbus-library/ModbusRTUServer.cpp \
-              packages/code/panel/pbus.c -o $t
-            ./$t
-          done
+      - name: The host tests, see tests/Makefile
+        run: make -C tests MODBUS=$GITHUB_WORKSPACE/modbus-library
 
   # The panel firmware's tests, esp_test too, against the panel code here, at the firmware commit in
   # packages/code/panel/proto.lock
@@ -119,10 +96,11 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        config: [esp32, esp32-c3, esp8266, esp32-panel-minimal]
+        config: [esp32, esp32-c3, esp8266, esp8266-minimal, esp32-panel-minimal]
     steps:
       - uses: actions/checkout@v7
 
@@ -146,7 +124,15 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          esphome compile tests/${{ matrix.config }}.yaml 2>&1 | tee build.log
+          esphome -s modbus_library_ref ${{ env.MODBUS_REF }} compile tests/${{ matrix.config }}.yaml 2>&1 | tee build.log
 
       - name: Check for warnings in our code
         run: tests/check_warnings.sh build.log
+
+      - name: The component built is this checkout's, not the one core.yaml fetches
+        run: |
+          name=$(sed -n 's/^  name: //p' tests/${{ matrix.config }}.yaml)
+          for f in flexit_modbus_server.cpp flexit_modbus_server.h; do
+            cmp "tests/.esphome/build/$name/src/esphome/components/flexit_modbus_server/$f" \
+                "esphome/components/flexit_modbus_server/$f"
+          done

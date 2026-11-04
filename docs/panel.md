@@ -18,16 +18,16 @@ way this page shows.
 ## Setup
 
 `packages/panel.yaml` is the link. Add the `panel/` packages you want after it. The panel runs at address 3, so
-the ESP goes to address 1. If your panel is at another address, set `panel_address` to match, like
-`- path: packages/panel.yaml` with `vars: {panel_address: "2"}`. The ESP only talks to that panel. A second panel
-with this firmware works fine without the ESP, just switch ESP off under System > Equipment on that one.
+the ESP goes to address 1. A panel still on the stock firmware is at 1 itself, so flash it first with the ESP at 2,
+see [Flashing the panel](#flashing-the-panel). If your panel is at another address, set `panel_address` to match,
+like `- path: packages/panel.yaml` with `vars: {panel_address: "2"}`. The ESP only talks to that panel. A second
+panel with this firmware works fine without the ESP, just switch ESP off under System > Equipment on that one.
 
 ```yaml
 substitutions:
   flexit_address: "1"
-  flexit_ref: panel
+  flexit_ref: main
   flexit_refresh: 1d
-  modbus_library_ref: dev
 
 packages:
   flexit:
@@ -47,9 +47,8 @@ packages:
         vars: {latitude: "59.9139", longitude: "10.7522"}
 ```
 
-The panel packages are on the `panel` branch, and they need the Modbus library's `dev` branch, which switches the
-RS-485 direction pin in hardware. The panel's bootloader needs that. If the ESP was built with the library's
-`main` before, do a Clean Build Files, or ESPHome keeps the old library.
+The panel packages need the current Modbus library, its `main`. If the ESP was built before October 2026, do a
+Clean Build Files, or ESPHome keeps the old library.
 
 `panel.yaml` gives Home Assistant `Panel Connected`, `Panel Temperature` (the panel's own sensor),
 `Panel Firmware`, `Panel Action` (filter reset and the like, picked on the panel), the screensaver and LED
@@ -65,6 +64,7 @@ started. The rest of the panel's settings are in its own menu and [`panel_set`](
 | `panel/fireplace.yaml`, `humidity_boost.yaml`, `co2.yaml`, `summer_cooling.yaml` | That package on the panel's comfort page |
 | `panel/picture.yaml`, `online_picture.yaml`, `ha_picture.yaml`, `animation.yaml`, `met.yaml` | Screensaver pictures |
 | `panel/update.yaml` | Flashes the panel's firmware from Home Assistant |
+| `panel/screen_camera.yaml` | What the panel shows, as a camera in Home Assistant |
 
 ## Your own things on the panel
 
@@ -175,6 +175,7 @@ letters, like the Norwegian ones, take two. Longer texts are cut.
 | `on_text`, `off_text` | 11 each |
 | A text item's state | 15 |
 | A `panel_notify` message | 64 |
+| A `panel_saver_text` line | 64 |
 
 ## The comfort packages
 
@@ -210,8 +211,61 @@ names, like `script.execute: {id: panel_notify, message: Hi, icon: bell, level: 
 | `panel_notify` (`message`, `icon`, `level`: info, warning, alarm) | A message that pops up on the panel and stays until it's closed |
 | `panel_show_view` (`view`: dashboard, airflow, trends, sensors, comfort, smart_home) | Wakes the panel and opens that view |
 | `panel_set` (`setting`, `value`) | One of the panel's [settings](#panel-settings) |
+| `panel_saver_text` (`lines`, `sizes`) | [Lines on the screensaver](#lines-on-the-screensaver) in place of the temperatures |
 
 The pictures and animations have [their own actions](#picture-and-animation-actions).
+
+### Lines on the screensaver
+
+The screensaver shows the indoor and outdoor temperatures in `Clock and temperatures` and `Picture and
+everything`. `panel_saver_text` puts up to 4 lines of your own there instead, each 16, 20 or 28 px tall (`sizes`,
+16 for a line without one, other sizes go to the nearest). Over a picture there's room for about 72 px, so a 28 px
+line and two 16 px ones. Lines that don't fit are left out, one too wide ends in dots, and an empty one leaves a
+gap. No lines bring the temperatures back, and so does the ESP going away. The ESP keeps the lines through a panel
+restart, not through its own, so update them from an automation that also runs now and then. In Home Assistant, a
+new automation's Edit in YAML:
+
+```yaml
+alias: Panel screensaver lines
+triggers:
+  - trigger: state
+    entity_id: [sensor.living_room_temperature, sensor.living_room_humidity, sensor.living_room_co2]
+  - trigger: time_pattern
+    minutes: /5
+actions:
+  - action: esphome.flexit_panel_saver_text
+    data:
+      lines:
+        - "{{ states('sensor.living_room_temperature') }} °C"
+        - "Humidity {{ states('sensor.living_room_humidity') }} %"
+        - "CO₂ {{ states('sensor.living_room_co2') }} ppm"
+      sizes: [28, 16, 16]
+```
+
+Or in your ESPHome YAML, from the ESP's own sensors. It sends only what changed, so once a minute costs nothing:
+
+```yaml
+interval:
+  - interval: 1min
+    then:
+      - script.execute:
+          id: panel_saver_text
+          lines: !lambda |-
+            // a blank line for a sensor that isn't fitted
+            auto temp = [](const char *label, float t) {
+              return std::isnan(t) ? std::string() : str_sprintf("%s%.1f °C", label, t);
+            };
+            return {temp("", id(extract_air_temperature).state), temp("Outdoor ", id(outdoor_air_temperature).state),
+                    temp("Supply ", id(supply_air_temperature).state)};
+          sizes: [28, 16, 16]
+```
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/MSkjel/flexit-ci600-firmware/raw/screens/all/shots/87b_saver_lines.png" width="280" alt="Lines over a picture"><br><sub>Over a picture</sub></td>
+<td align="center"><img src="https://github.com/MSkjel/flexit-ci600-firmware/raw/screens/all/shots/87d_saver_lines_black.png" width="280" alt="Lines on black"><br><sub>On black</sub></td>
+</tr>
+</table>
 
 ### Panel settings
 
@@ -278,18 +332,22 @@ letters, digits and `_`.
 | `picture.yaml` | `name`, `file` (PNG or JPEG next to your config). `encoding`: `auto`, `palette` (16 colours) or `jpeg`; a palette picture that doesn't fit the panel's 14 KB goes as a JPEG anyway. `quality`: the JPEG quality, or `auto` for the best that fits |
 | `online_picture.yaml` | `name`, `url`, `update_interval` (like `10min`, `1.5h` or `1d`, `never` = only when shown), `format` (PNG, JPEG, BMP or AUTO), `resize` (160x120 default, blown up to the screen; 320x240 needs PSRAM), plus `encoding` and `quality`. A failed download is retried after 30 s, then twice as long each time. Before each download the ESP asks the server about the file and skips one it doesn't have the RAM for, with the reason in `Panel Picture Status`. A JPEG has to fit in RAM whole, so the server has to send its size; PNG and BMP are read a bit at a time. For a Home Assistant camera use `ha_picture.yaml` |
 | `ha_picture.yaml` | `name`, `entity_id` (a `camera.` or `image.` entity, with `kind: image` for the latter), `ha_url` (`http://homeassistant.local:8123`), `width` (320, HA scales the camera picture down to it when the camera can), plus `update_interval`, `resize`, `format`, `encoding` and `quality` as above. HA only hands out camera pictures with a token that changes now and then; the ESP follows the entity's `access_token` attribute, so nothing to set up. If the camera won't scale, the full picture is often too big for an ESP without PSRAM and is skipped; a Frigate camera's own `latest.jpg?h=120` through `online_picture.yaml` is the way round that |
-| `animation.yaml` | `name`, `file` (a GIF), `resize` (64x64 default), `x`, `y` (top left on the 320x240 screen), `scale` (1, or 2 to draw each pixel 2x), `frame_ms` (40 to 2550, the GIF's own timing isn't used), `drift_x`, `drift_y` (pixels per second it drifts, wrapping round the screen seamlessly), `fade_ms` (300, how long copies fade in and out). The panel plays all its animations from 6 KB, up to 4 at a time in up to 8 places, so keep them small: about 64x64 with a few frames, or more frames if little changes between them. Too big at scale 1 and it's made at half size and drawn 2x. `Panel Animation Status` says what's shown and what didn't fit |
+| `animation.yaml` | `name`, `file` (a GIF), `resize` (64x64 default), `x`, `y` (top left on the 320x240 screen), `scale` (1, or 2 to draw each pixel 2x), `frame_ms` (40 to 2550, the GIF's own timing isn't used), `drift_x`, `drift_y` (pixels per second it drifts, wrapping round the screen seamlessly), `fade_ms` (300, how long copies fade in and out). The panel plays all its animations from 8 KB, up to 6 at a time in up to 8 places, so keep them small: about 64x64 with a few frames, or more frames if little changes between them. Too big at scale 1 and it's made at half size and drawn 2x. `Panel Animation Status` says what's shown and what didn't fit |
 | `met.yaml` | `latitude`, `longitude`, `scene` (hills, coast, mountains, city), `aurora` (auto, off, always), `update_interval` (5 min, the forecast is only fetched again when MET says it expired), `redraw_interval`, `name` (weather). `Panel Weather Scene`, `Panel Weather Aurora` and `Panel Weather Forecast` change it from Home Assistant, `Panel Animation Weather` brings it to life |
 
 `met.yaml` draws the sky for the time of day and the next hour's weather from [MET Norway](https://api.met.no)
 (CC BY 4.0). The weather right now is also an item, so it can be a dashboard tile, and the cabin's chimney smokes
-when the heater is on. A failed request with `Code: 304` in the log is fine, the forecast just hasn't changed.
+when the heater is on. `The forecast hasn't changed (HTTP 304)` in the log is fine, MET has nothing newer yet. When
+MET is busy or down (HTTP 502, 503) the picture keeps the last forecast and asks again a minute later, then less
+often, up to every half hour.
 
 `Panel Animation Weather`, on unless you turn it off, adds slow animations that fit the picture, one show at a
 time: gulls over the cabin, rain and snow falling from under the clouds, the aurora glowing, a moose at dusk, the
 sailboat, the town's windows, the lights on the Christmas spruce, fireworks on New Year's Eve, the flag waving on
 flag days and more, some of them by chance now and then. Very seldom something stranger comes by. The picture
-leaves out what they draw. They take the panel's animations, so turn your other ones off with it.
+leaves out what they draw, and tells the panel what in it is nearer, so they go behind it where they should: the
+sailboat behind the point and the flagpole, a roe deer out of the forest from behind a spruce. Your own animations
+are always in front of all of it. They take the panel's animations, so turn your other ones off with it.
 
 ### Picture and animation actions
 
@@ -298,8 +356,8 @@ Like the [other actions](#messages-views-and-settings), in Home Assistant and as
 | Action | Does |
 |---|---|
 | `panel_show_picture` (`name`), `panel_clear_picture` | The screensaver picture, same as the `Panel Picture` select |
-| `panel_show_animation` (`name`), `panel_clear_animation` (`name`, or none for all) | An animation over it, where its yaml puts it, the same as its `Panel Animation <name>` switch. Showing it again puts copy 0 back there if it went. Any combination of them, within the panel's 6 KB |
-| `panel_place_animation` (`name`, `copy`, `x`, `y`, `own`, `start`), `panel_remove_animation` (`name`, `copy`) | The same animation in more places, which can start off the screen to come in. Copy 0 is the one `panel_show_animation` shows, copy 1 and up are extra. They play in step and cost nothing extra, unless `own: true` gives the copy a frame of its own, which takes another w x h / 2 bytes of the 6 KB and starts `start` frames in |
+| `panel_show_animation` (`name`), `panel_clear_animation` (`name`, or none for all) | An animation over it, where its yaml puts it, the same as its `Panel Animation <name>` switch. Showing it again puts copy 0 back there if it went. Any combination of them, within the panel's 8 KB |
+| `panel_place_animation` (`name`, `copy`, `x`, `y`, `own`, `start`), `panel_remove_animation` (`name`, `copy`) | The same animation in more places, which can start off the screen to come in. Copy 0 is the one `panel_show_animation` shows, copy 1 and up are extra. They play in step and cost nothing extra, unless `own: true` gives the copy a frame of its own, which takes another w x h / 2 bytes of the 8 KB and starts `start` frames in |
 | `panel_move_animation` (`name`, `copy`, `x`, `y`, `ms`, `ease`), `panel_drift_animation` (`name`, `copy`, `vx`, `vy`) | Glide a copy to `x`, `y` over `ms` (0 jumps, 65535 at most), or drift it at `vx`, `vy` pixels per second (to a tenth, like 0.5), round the screen or as its area says; 0, 0 stops it. Drifting over a JPEG photo costs more redraws than over a palette picture, so keep it slow there |
 | `panel_glide_animation` (`name`, `copy`, `what`, `to`, `ms`, `ease`) | One of a copy's `x`, `y`, `turn`, `size`, `opacity` or `speed` to `to` over `ms`. A turn goes the short way round, size is 10 to 400, opacity 0 to 100, speed 0 to 1000 |
 | `panel_spin_animation` (`name`, `copy`, `speed`), `panel_flip_animation` (`name`, `copy`, `horizontal`, `vertical`) | Spin a copy at `speed` degrees per second, negative the other way, 0 stops it where it is. Flip mirrors it left to right, upside down or both. Quarter turns and flips stay sharp, other angles look rougher |
@@ -402,11 +460,41 @@ Examples, for an ESP called `flexit`:
   data: {name: fan, percent: "{{ states('sensor.flexit_supply_fan_speed_percentage') | int(0) * 2 }}"}
 ```
 
+## The panel's screen in Home Assistant
+
+`panel/screen_camera.yaml` adds `Panel Screen`, a camera of whatever the panel shows: the home page, a menu, the
+screensaver. ESP32 only, and it needs panel firmware that takes screenshots. It's a diagnostic entity, so Home
+Assistant's own dashboards leave it out: one left open fetches an image every 10 s, and the panel keeps taking
+them. It's on the device's page, or add it to a dashboard of your own.
+
+```yaml
+      - path: packages/panel/screen_camera.yaml
+        vars: {quality: "90"}  # JPEG quality, 1-100: higher is sharper text and slower, best kept at 95 or under
+                               # category: "" for an ordinary entity, on the dashboards
+```
+
+The panel doesn't keep a copy of its screen. While someone looks, it draws its screen again in 64x8 tiles and
+sends each one as a bit of JPEG as it goes to the display, after the first time only the tiles that changed. The
+ESP puts them together. The first look shows what came within 4 s, black where nothing has yet, and the live view
+fills in over about 10 s. After that an image takes a second or two, the clock ticking over is 4 tiles. The tiles
+take about 25 KB of the ESP's RAM, let go a minute after the last look; without the RAM it doesn't ask. While the
+ESP sends the panel a picture or an animation, the screen waits. A tile has to fit in about 700 bytes on the panel,
+so above quality 95 the busiest tiles lose their faint detail.
+
 ## Flashing the panel
 
 `panel/update.yaml` flashes the panel's firmware from Home Assistant: press `Flash Panel Firmware` and watch
-`Panel Firmware Update`. The steps, and what to do when it doesn't work, are in the firmware's
-[flashing docs](https://github.com/MSkjel/flexit-ci600-firmware/blob/main/docs/flashing.md#from-home-assistant).
+`Panel Firmware Update`. A file the ESP refuses, like the version the panel already has, goes on anyway with
+`Panel Firmware Force` on. It's off again after a restart. The steps, and what to do when it doesn't work, are in
+the firmware's [flashing docs](https://github.com/MSkjel/flexit-ci600-firmware/blob/main/docs/flashing.md#from-home-assistant).
+
+`Panel Firmware` is the same thing as an update in Home Assistant. Every 6 h (`check_interval`) the ESP reads the
+version from the start of the file at `Panel Firmware URL`, and when that's newer than the panel it shows up under
+Settings > Updates, where Install does what the button does. It compares version numbers only, and a panel that
+doesn't report one, like a stock panel or one with another link version, shows as unknown. The button works for those.
+
+The file doesn't say which link version it has. If a flash leaves the panel on another one than the ESP,
+`Panel Firmware Update` says which of the two to update, and so does `Panel Firmware`'s summary.
 
 ## Icons
 

@@ -12,8 +12,7 @@ this page says otherwise.
 
 ## Summary
 
-Status as of 2026-10-28, with upstream `main` merged at `67eb792` (the CI600
-panel support, PR #39).
+Status as of 2026-11-05, with upstream `main` merged at `46abb68` (PR #51).
 
 | Change | Files | Proposed upstream? |
 |---|---|---|
@@ -34,8 +33,8 @@ Earlier differences that are gone, because upstream has them now:
   them under "Saved settings and counters".
 - **The library link.** Upstream's `modbus_library_ref` option picks the
   ESP-ModbusRTUServer branch, tag or commit, and the README describes it. The
-  library's `main` has the RS485 echo filter. Its `dev` branch was deleted after
-  library PR #9, so a configuration that still names `dev` no longer builds.
+  library's `main` has the RS485 echo filter. Library changes go to its `dev`
+  first, and upstream's CI builds its own `dev` against it.
 
 ## Echoed exception responses are not answered
 
@@ -114,4 +113,10 @@ of `pbus.c`.
 - `git diff main live` shows everything this fork changes.
 - An upstream change next to `flexit_ref` or `external_components` in
   `packages/core.yaml` merges with a conflict. Keep this fork's two lines.
+- A merge can bring a component that needs a newer library than the build has.
+  ESPHome keeps the copy it downloaded and `flexit_refresh` doesn't apply to
+  it, so the first build after such a merge needs Clean Build Files. The merge
+  of `46abb68` is one: the component calls `processFrame()` with the
+  `crcChecked` argument from library PR #11 (2026-11-02), and doesn't compile
+  against an older copy.
 - Changes meant for upstream go on their own branches cut from `main`.

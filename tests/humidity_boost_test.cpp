@@ -1,9 +1,6 @@
 // humidity_boost.h on the component and a CX60 (cx60.h): when a boost starts and ends, and the CX60's mode.
-// Needs the Modbus library, ESP-ModbusRTUServer, in $LIB.
-//   g++ -std=gnu++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/stubs -Ipackages/code
-//     -Iesphome/components/flexit_modbus_server -I$LIB tests/humidity_boost_test.cpp
-//     esphome/components/flexit_modbus_server/flexit_modbus_server.cpp $LIB/ModbusRTUServer.cpp
-//     packages/code/panel/pbus.c -o humidity_boost_test && ./humidity_boost_test
+// Needs the Modbus library, see the Makefile.
+//   make -C tests humidity_boost_test
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -11,10 +8,11 @@
 #include "cx60.h"
 
 // humidity_boost.yaml's entities, at their defaults
-static Sensor humidity, humidity_baseline;
+static Sensor humidity, humidity_baseline, humidity_rise_low;
 static Switch humidity_boost, humidity_boost_enable;
 static Number humidity_trigger_delta{8}, humidity_release_delta{3}, humidity_release_minutes{5},
     humidity_boost_min_minutes{5}, humidity_boost_max_minutes{45}, humidity_boost_cooldown_minutes{15};
+static Number humidity_rise_trigger{0};  // off unless a case turns it on
 
 #include "humidity_boost.h"
 
@@ -22,8 +20,10 @@ namespace hb = flexit::humidity_boost;
 
 // The baseline sensor's median filter, window 60
 static std::deque<float> window;
+// humidity_rise_low's min filter, window 5
+static std::deque<float> rise_window;
 
-// Runs `s` seconds: the baseline sample every minute and the tick every 10 s, like humidity_boost.yaml
+// Runs `s` seconds: the baseline and rise samples every minute and the tick every 10 s, like humidity_boost.yaml
 static void run(uint32_t s) {
   for (uint32_t i = 0; i < s; i++) {
     cx60_second();
@@ -38,6 +38,13 @@ static void run(uint32_t s) {
         size_t n = sorted.size();
         humidity_baseline.publish_state(n % 2 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2);
       }
+      auto r = hb::rise_sample(&humidity, 5);
+      if (r.has_value()) {
+        rise_window.push_back(*r);
+        if (rise_window.size() > 5)
+          rise_window.pop_front();
+        humidity_rise_low.publish_state(*std::min_element(rise_window.begin(), rise_window.end()));
+      }
     }
     if (now_ms % 10000 == 0)
       hb::tick(&humidity);
@@ -51,12 +58,15 @@ static void start(int minutes) {
   boot();
   hb::state = {};
   window.clear();
+  rise_window.clear();
   humidity_baseline = {};
+  humidity_rise_low = {};
   humidity_boost = {false, hb::start, hb::stop};
   humidity_boost_enable = {true};
   humidity_release_minutes.state = 5;
   humidity_boost_cooldown_minutes.state = 15;
   humidity.publish_state(50);
+  humidity_rise_trigger.state = 0;
   run(minutes * 60);
 }
 
@@ -194,6 +204,75 @@ int main() {
   CHECK(boosting());
   run(60);
   CHECK(!boosting());
+
+  // A fast rise starts it below the trigger delta: the humidity was a little up already, then rises the rise
+  // trigger within the rise minutes
+  start(15);
+  humidity_rise_trigger.state = 5;
+  humidity.publish_state(52);
+  run(10 * 60);
+  CHECK(!boosting());
+  humidity.publish_state(57);  // 7 over the baseline, under the trigger delta, but up 5 in a minute
+  run(60);
+  CHECK(boosting() && cx60.mode == MODE_MAX);
+
+  // The same rise with the rise trigger off doesn't
+  start(15);
+  humidity.publish_state(52);
+  run(10 * 60);
+  humidity.publish_state(57);
+  run(60);
+  CHECK(!boosting());
+
+  // The same rise, but slower than the rise minutes, doesn't
+  start(30);
+  humidity_rise_trigger.state = 5;
+  humidity.publish_state(52);
+  run(10 * 60);
+  for (int h = 53; h <= 57; h++) {
+    humidity.publish_state(h);
+    run(2 * 60);
+  }
+  run(10 * 60);
+  CHECK(!boosting());
+
+  // A rise in the cooldown waits too, and once it's over it isn't one any more
+  start(30);
+  humidity_rise_trigger.state = 5;
+  shower();
+  humidity.publish_state(50);
+  run(6 * 60);
+  CHECK(!boosting());
+  humidity.publish_state(52);
+  run(2 * 60);
+  humidity.publish_state(57);
+  run(60);
+  CHECK(!boosting());
+  run(13 * 60);
+  CHECK(!boosting());
+  // A new one after the cooldown does
+  humidity.publish_state(52);
+  run(6 * 60);
+  humidity.publish_state(57);
+  run(60);
+  CHECK(boosting());
+
+  // A gap in the readings: the lowest value from before it isn't where a rise starts
+  start(15);
+  humidity_rise_trigger.state = 5;
+  humidity.publish_state(52);
+  run(10 * 60);
+  humidity.publish_state(NAN);
+  run(2 * 60);
+  humidity.publish_state(57);
+  run(60);
+  CHECK(!boosting());
+  run(5 * 60);  // and the window is whole again
+  humidity.publish_state(52);
+  run(6 * 60);
+  humidity.publish_state(57);
+  run(60);
+  CHECK(boosting());
 
   printf("humidity boost test: %s\n", fails ? "FAILED" : "ok");
   return fails != 0;

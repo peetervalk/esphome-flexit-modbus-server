@@ -25,7 +25,7 @@ struct Show {
 // clouds of the high layer, or of the middle and low ones
 inline bool has_clouds(const Scene &s, bool high) {
   for (int i = 0; i < s.nclouds; i++)
-    if ((s.cloud_layer[i] == 0) == high)
+    if (high_cloud(s, i) == high)
       return true;
   return false;
 }
@@ -54,7 +54,7 @@ inline const Show SHOWS[] = {
      [](const Scene &s) { return s.at.thunder; }},
     {"Gentle snowfall", L_PREC, snowfall, prec_redo, in_gale,
      [](const Scene &s) { return s.at.snow; }},
-    {"Light rain", L_PREC, light_rain, prec_redo, in_gale,
+    {"Light rain", L_PREC, snowfall, prec_redo, in_gale,
      [](const Scene &s) { return s.at.rain; }},
     {"Fog in the valley", L_FLAG, valley_fog, nullptr, nullptr,
      [](const Scene &s) { return s.at.fog > 30 && !s.at.dark; }},
@@ -89,7 +89,7 @@ inline const Show SHOWS[] = {
      [](const Scene &s) { return s.cabin && s.puffs; }},
     {"High clouds", L_CIRRUS | L_FLAG, high_clouds, nullptr, high_shapes,
      [](const Scene &s) { return !s.at.dark && has_clouds(s, true) && !has_clouds(s, false) && clouds_fit(s, true); }},
-    {"Drifting clouds", L_CLOUDS | L_BIRDS | L_FLAG, lower_clouds, nullptr, lower_shapes,
+    {"Drifting clouds", L_CLOUDS | L_FLAG, lower_clouds, nullptr, lower_shapes,
      [](const Scene &s) { return !s.at.dark && has_clouds(s, false) && clouds_fit(s, false); }},
     {"Gulls over the cabin", L_BIRDS | L_FLAG, gulls, nullptr, cabin_wind,
      [](const Scene &s) { return s.cabin && !s.at.dark; }},
@@ -139,6 +139,7 @@ inline void apply(const Scene &s) {
   if (i >= 0 && SHOWS[i].made_of)
     where = where * 31u + SHOWS[i].made_of(s);
   R.sun_x = (int16_t) (s.sun ? s.sun_x : -1);
+  R.light = s.at.light;
   if (i != R.show || where != R.where) {
     stop();
     R.where = where;

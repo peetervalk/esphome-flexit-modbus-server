@@ -6,6 +6,8 @@ esp32:
   board: seeed_xiao_esp32c3
   framework:
     type: esp-idf
+    sdkconfig_options:
+      CONFIG_UART_ISR_IN_IRAM: "y"
 
 # ERROR, so every other log compiles out and catches one left as the only statement of an if. The other tests
 # build with them all.
@@ -13,10 +15,11 @@ logger:
   level: ERROR
 
 substitutions:
-  flexit_tx_pin: GPIO6
-  flexit_rx_pin: GPIO7
-  flexit_tx_enable_pin: GPIO4
+  flexit_tx_pin: D4
+  flexit_rx_pin: D5
+  flexit_tx_enable_pin: D2
   flexit_tx_enable_direct: "false"  # builds the inverted DE pin, esp32.yaml has the direct one
+  flexit_address: "1"  # panel.yaml wants the ESP at 1
 
 packages:
   common: !include common.yaml

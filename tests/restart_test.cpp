@@ -1,10 +1,7 @@
 // Reboot test for controls.h, co2.h and fireplace.h, which change CX60 settings for a while, on the component and
 // ESPHome's flash as tests/stubs has them. After hours of CO2, fireplace mode, changes by hand and reboots, the CX60
-// must still have the user's fan speeds and mode. Needs the Modbus library, ESP-ModbusRTUServer, in $LIB.
-//   g++ -std=gnu++20 -O1 -Wall -Wextra -Wno-unused-parameter -Werror -fsanitize=address,undefined -Itests/stubs
-//     -Ipackages/code -Iesphome/components/flexit_modbus_server -I$LIB tests/restart_test.cpp
-//     esphome/components/flexit_modbus_server/flexit_modbus_server.cpp $LIB/ModbusRTUServer.cpp
-//     packages/code/panel/pbus.c -o restart_test && ./restart_test [runs] [quiet] [run to trace]
+// must still have the user's fan speeds and mode. Needs the Modbus library, see the Makefile.
+//   make -C tests restart_test
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -73,8 +70,8 @@ static std::vector<uint8_t> hear(const std::vector<uint8_t> &bytes) {
 }
 
 // It polls our coils, 0x14C of them but these are the ones that matter here, reads each register we flagged and
-// passes on what it took with FC65, then sends its status
-static void cx60_cycle() {
+// passes on what it took with FC65
+static void cx60_poll() {
   static const auto poll = frame({1, 0x01, 0x00, 0x00, 0x00, SETTINGS});
   auto coils = hear(poll);
   for (int r = 0; r < SETTINGS; r++) {
@@ -86,6 +83,11 @@ static void cx60_cycle() {
       CX60.reg[r] = read[3] << 8 | read[4];
     hear(fc65(r, CX60.reg[r]));
   }
+}
+
+// Then sends its status
+static void cx60_cycle() {
+  cx60_poll();
   // every cycle on the bus, here only when the mode in it is news to the ESP, to keep the test quick
   if (!server->synced() || server->read_holding_register(REG_MODE) != CX60.reg[REG_CMD_MODE])
     hear(status({{REG_MODE, CX60.reg[REG_CMD_MODE]}}));
@@ -149,8 +151,6 @@ static void second() {
     flexit::co2::tick(&co2);
   if (flexit::fireplace::conflict())
     flexit::fireplace::turn_off();  // fireplace.yaml's conflict sensor
-  if (t % 60000 == 0)
-    flash.sync();  // flash_write_interval
 }
 
 // ---------------------------------------------------------------- the user
@@ -312,6 +312,23 @@ int main(int argc, char **argv) {
          boot();
          run(60);
        }},
+      {"fireplace mode, power cut before the next status broadcast",
+       [] {
+         flexit::fireplace::turn_on();
+         cx60_poll();
+         down(false);
+         run(10);
+         boot();
+       }},
+      {"fireplace mode, power cut before the next status broadcast, the unit restarted too",
+       [] {
+         flexit::fireplace::turn_on();
+         cx60_poll();
+         down(false);
+         run(10);
+         boot();
+         unit_restart();
+       }},
       {"fireplace mode, update",
        [] {
          flexit::fireplace::turn_on();
@@ -417,7 +434,7 @@ int main(int argc, char **argv) {
        }},
   };
   global_preferences = &flash;
-  log_on = argc <= 2;
+  log_on = getenv("LOG") != nullptr;
   for (auto &c : cases) {
     start_over();
     case_bad = 0;

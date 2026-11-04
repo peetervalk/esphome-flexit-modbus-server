@@ -1,9 +1,6 @@
 // summer_cooling.h on the component and a CX60 (cx60.h): when cooling starts and stops, and the CX60's mode.
-// Needs the Modbus library, ESP-ModbusRTUServer, in $LIB.
-//   g++ -std=gnu++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/stubs -Ipackages/code
-//     -Iesphome/components/flexit_modbus_server -I$LIB tests/summer_cooling_test.cpp
-//     esphome/components/flexit_modbus_server/flexit_modbus_server.cpp $LIB/ModbusRTUServer.cpp
-//     packages/code/panel/pbus.c -o summer_cooling_test && ./summer_cooling_test
+// Needs the Modbus library, see the Makefile.
+//   make -C tests summer_cooling_test
 #include <cstdio>
 #include <cstdlib>
 #include "cx60.h"
@@ -94,9 +91,21 @@ int main() {
   run(5);
   CHECK(cx60.mode == MODE_NORMAL);
 
+  // And when the extract sensor is gone, or set as not fitted
+  start();
+  starts();
+  cx60.extract = -150;
+  run(35);
+  CHECK(!cooling());
+  start();
+  starts();
+  hear(fc65(REG_CMD_SENSOR_EXTRACT_ENABLE, 0));
+  run(35);
+  CHECK(!cooling());
+
   // Not when any one says no: too cool inside, the setpoint too near the inside, outside not cool enough or too
-  // cold, the heater on, turned off, the unit stopped
-  for (int no = 0; no < 7; no++) {
+  // cold, the heater on, turned off, the unit stopped, no extract or outdoor sensor
+  for (int no = 0; no < 9; no++) {
     start();
     if (no == 0)
       cx60.extract = 23.9f;
@@ -112,6 +121,10 @@ int main() {
       summer_cooling_enable.turn_off();
     if (no == 6)
       mode_on_panel(MODE_STOP);
+    if (no == 7)
+      cx60.extract = -150;
+    if (no == 8)
+      cx60.outdoor = -150;
     run(2 * 60);
     CHECK(!cooling());
     CHECK(cx60.mode != MODE_MAX);

@@ -4,6 +4,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "pdeflate.h"
 #include "plink_keys.h"
 #include "plink_values.h"
 
@@ -11,7 +12,7 @@
 extern "C" {
 #endif
 
-#define PLINK_VERSION 3
+#define PLINK_VERSION 4
 
 // Message kinds. A newer VALUE replaces one still waiting, but every EVENT counts. BYTES are texts and pictures,
 // every one counts too.
@@ -42,7 +43,7 @@ static inline uint16_t plink_item_id(const char *name) {
   return (uint16_t) (h & ITEM_ID_MASK ? h & ITEM_ID_MASK : 1);
 }
 
-// ---- The panel's messages to the ESP, numbers only
+// ---- The panel's messages to the ESP, numbers only. Screenshots go alongside, see app/shot.c
 #define PLINK_QUEUE 32
 
 typedef struct {
@@ -70,9 +71,12 @@ unsigned plink_pack_row(const uint8_t *row, unsigned n, uint8_t *out);
 // Animation frame cur as the rectangle that changed since prev, or the whole frame if prev is NULL. w x h, w even,
 // packed like picture rows. The record is ANIM_RECORD_*: delay (in ANIM_TICK_MS), x / 2, y, w / 2, h, then the
 // rectangle deflated, nothing if it's empty. out needs ANIM_RECORD_HEAD + PDEFLATE_BOUND(w / 2 x h) bytes. Returns the
-// record's length, 0 if there wasn't memory to compress it.
+// record's length, 0 if there wasn't memory to compress it. _in deflates in work's blocks for w / 2 x h bytes,
+// so nothing is malloc'd.
 unsigned plink_anim_record(const uint8_t *prev, const uint8_t *cur, unsigned w, unsigned h, uint8_t delay,
                            uint8_t *out);
+unsigned plink_anim_record_in(const pdeflate_work_t *work, const uint8_t *prev, const uint8_t *cur, unsigned w,
+                              unsigned h, uint8_t delay, uint8_t *out);
 
 // ---- The ESP's picture and animation transfers, see plink_keys.h
 // 16 0xRRGGBB colours as PIC_PAL_LEN bytes

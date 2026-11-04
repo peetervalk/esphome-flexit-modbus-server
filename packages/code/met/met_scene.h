@@ -13,12 +13,19 @@
 namespace flexit::panel::met {
 
 inline constexpr int W = 320, H = 240;
-inline constexpr int HORIZON = 156;                        // just above the panel's clock band, the bottom 74 rows
-inline constexpr int CABIN_X = 178;                        // in the band's gap between the clock and the temperatures
+inline constexpr int HORIZON = 156;  // just above the panel's clock band, the bottom 74 rows
+inline constexpr int CABIN_X = 178;  // in the band's gap between the clock and the temperatures
+// The panel's clock and date go over the bottom left of the picture, its temperatures over the bottom right, with
+// the texts where most have them. What a show parks on the land goes in the gap between them, or under the
+// temperatures right of the date.
+inline constexpr int GAP_L = 126, GAP_R = 228, DATE_R = 154, TEMPS_BOT = 222;
 inline constexpr int OV_H = 64;                            // rows of the forecast overlay, at the top
 inline constexpr int16_t BAND[5] = {0, 52, 92, 118, 138};  // first row of each sky band
 inline constexpr int RB_RX = 100, RB_RY = 96;              // the rainbow's outer radii
 inline constexpr int LH_X = 268;                           // the lighthouse, on the coast's point
+inline constexpr int PENNANT_MAX = 36;                     // the pennant's length in a strong wind
+inline constexpr int PENNANT_LEFT = PENNANT_MAX + 1;       // how far from the pole it reaches blown left,
+inline constexpr int PENNANT_RIGHT = PENNANT_MAX + 3;      // and right
 inline constexpr uint8_t NONE = 255;                       // a row in the per-column arrays: none in this column
 // Radii of the sun's disc and its rings, and of the moon's disc and its glow
 inline constexpr int SUN_R = 13, RING1_R = 21, RING2_R = 30;
@@ -38,6 +45,11 @@ inline constexpr Baseline BASELINES[] = {{174, 204}, {184, 206}, {186, 206}, {17
 // The city's middle ground, flat. The buildings stand on it and the near windows end 4 rows above it.
 // Thick fog lies at this row in every landscape.
 inline constexpr int CITY_GROUND_Y = BASELINES[G_CITY].mid;
+// The city's road along the buildings' foot, rows from the far pavement to the near one: the far lane, its dashed
+// middle, the near lane, the kerb and the red bike lane. What stands behind it stands on the far pavement, and
+// nothing in front reaches up into it, so what drives on it never passes through anything.
+inline constexpr int ROAD_FAR = CITY_GROUND_Y, ROAD_MID = ROAD_FAR + 4, ROAD_KERB = ROAD_FAR + 8,
+                     ROAD_NEAR = ROAD_FAR + 11;
 // What the weather animations draw in the picture's place, see met_live.h
 enum : uint16_t {
   L_BIRDS = 1 << 0,
@@ -53,6 +65,19 @@ enum : uint16_t {
   L_BONFIRE = 1 << 10,  // its flames, sparks and smoke, the logs stay
   L_ANTENNA = 1 << 11,  // its red light
   L_BOAT = 1 << 12,
+};
+// How far off things are, for the panel's K_PIC_PART and K_ANIM_DEPTH. The picture's parts are the land's layers,
+// each in front of the animations farther off than it. An animation without a depth is in front of them all.
+enum Depth : uint8_t {
+  D_SKY = 0,        // behind the land
+  D_RIDGE = 20,     // the mountains' far ridge
+  D_FAR = 40,       // the far hills
+  D_SEA = 60,       // the water and what's on it, and the fog over the far hills
+  D_MID = 80,       // the middle hill and its trees, the lighthouse and the town
+  D_MID_ON = 90,    // on the middle hill or the town's road, in front of them
+  D_NEAR = 120,     // the near hill
+  D_NEAR_ON = 130,  // on the near hill, in front of it, behind its trees, the cabin and the pole
+  D_FRONT = 160,    // the near hill's trees, the cabin and the pole
 };
 struct Options {
   Ground ground = G_HILLS;
@@ -113,6 +138,9 @@ enum : uint8_t {
   C_BLD,
   C_BLD_BACK,
   C_BLD_EDGE,
+  C_ROAD,  // the road's asphalt, its kerbs and dashes, and the bike lane
+  C_KERB,
+  C_LANE,
   C_RIDGE,
   C_LH,
   C_LH_BAND,
@@ -144,13 +172,14 @@ struct Cloud {
 // A one-colour bitmap. Layer 0 is drawn in the sky behind the ground, 1 in front of it, 2 on top of everything.
 struct Sprite {
   int16_t x, y;
-  uint8_t w, h;                  // at most 32 by 24
+  uint8_t w, h;                  // at most 64 by 24
   uint16_t layer : 2, tag : 14;  // tag: the L_* it's left out for, or 0
   uint32_t c : 24, ix : 8;       // 0xRRGGBB, and its place in the palette
-  uint32_t rows[24];             // leftmost pixel in the highest of w bits
+  uint64_t rows[24];             // leftmost pixel in the highest of w bits
 };
 inline constexpr int SPRITES = 32;
 static_assert(L_BOAT < 1 << 14, "the L_* fit Sprite::tag");
+static_assert(PENNANT_MAX + 4 <= 64, "the pennant's sprite fits its rows");
 
 // The land's shape, which only depends on the place and the landscape, so it's kept from one scene to the next
 struct Land {
@@ -186,6 +215,7 @@ struct At {
   bool dark, rain, snow, thunder;
   bool white;  // snow on the ground
   bool fair;   // sunny enough for birds
+  bool north;  // from Nordland and north, from 65 degrees
   bool xmas, newyear, easter_days, midsummer, halloween, valentine, may17, flag_up, fireplace;
   int8_t wdir;                                // which way the wind blows things, 1 to the right
   uint8_t season, hour, month, day, weekday;  // weekday 0 Sunday, season see season_of()
@@ -243,7 +273,7 @@ struct Scene {
   bool cabin;
   int16_t cabin_x, cabin_y;  // centre, and floor on the near hill
   bool window_lit;
-  int16_t pole_x, pole_top, pole_base;  // flagpole, by the cabin or in the city's park
+  int16_t pole_x, pole_top, pole_base;  // flagpole, by the cabin or by the city's road
   int16_t home_x;                       // where the holidays happen, the cabin or the pole
   // where things are, for the weather animations, x -1 for none: the chimney's top, the bonfire's base, the
   // pumpkin, the boat, the antenna's top, the star on the Christmas spruce, the eggs and the spruce's lights
@@ -294,12 +324,24 @@ inline int cloud_x(const Scene &s, int i) {
   return (s.cloud[i].x + s.drift[s.cloud_layer[i]]) % FIELD - (FIELD - W) / 2;
 }
 
-// Half width of an ellipse dy rows from its centre, -1 if outside
+inline bool high_cloud(const Scene &s, int i) { return s.cloud_layer[i] == 0; }  // the rest are middle and low
+
+// Half width of an ellipse dy rows from its centre, -1 if outside: rx * sqrt(1 - dy^2 / ry^2) rounded, so the
+// largest h with (2h - 1)^2 ry^2 <= 4 rx^2 (ry^2 - dy^2). In integers, an ESP32-C3 has no FPU.
 inline int half(int dy, int rx, int ry) {
   if (dy < -ry || dy > ry || ry <= 0)
     return -1;
-  float v = 1 - (float) (dy * dy) / (float) (ry * ry);
-  return (int) (rx * sqrtf(v) + 0.5f);
+  uint64_t most = 4ull * (uint32_t) (rx * rx) * (uint32_t) (ry * ry - dy * dy);
+  int lo = 0, hi = std::max(rx, 0);
+  while (lo < hi) {
+    int h = (lo + hi + 1) / 2;
+    uint64_t q = (uint64_t) (2 * h - 1) * (uint32_t) ry;
+    if (q * q <= most)
+      lo = h;
+    else
+      hi = h - 1;
+  }
+  return lo;
 }
 
 // A spruce's half width d rows below its top, a narrow cone with ragged tiers, and whether snow lies on it there
@@ -319,6 +361,37 @@ inline NearTrees near_trees(const Scene &s, int kind) {
     if (s.tree[k].layer == 2 && (kind < 0 || s.tree[k].kind == kind))
       t.i[t.n++] = (uint8_t) k;
   return t;
+}
+
+// The forest's edge on the near hill left of the gap, beside the near spruce nearest it: x the first column clear of
+// the spruce, y its base, tx and top its middle and top row. x -1 if there's none.
+struct Edge {
+  static constexpr int FLOOR = 4;  // rows of the hill under the spruces' bases in front of what walks in the forest
+  int16_t x = -1, y = 0, tx = 0, top = 0;
+  // The left column that has a thing w by h, its bottom row at bottom, all behind the spruce or the floor under it,
+  // -1 if it's too big for it
+  int hide(int w, int h, int bottom) const {
+    int l = tx - w / 2;
+    for (int r = std::min(bottom, (int) y); r > bottom - h; r--)
+      if (r < top || l < tx - spruce_hw(r - top) || l + w - 1 > tx + spruce_hw(r - top))
+        return -1;
+    return l >= 0 && bottom <= y + FLOOR ? l : -1;
+  }
+  // Where it comes out of the forest from and goes back into: behind the spruce, or off the left through the trees
+  int out(int w, int h, int bottom) const {
+    int l = hide(w, h, bottom);
+    return l >= 0 ? l : -w - 2;
+  }
+};
+inline Edge forest_edge(const Scene &s) {
+  Edge e;
+  for (int i : near_trees(s, 0)) {
+    const Tree &t = s.tree[i];
+    int x = t.x + spruce_hw(t.base - t.top) + 1;
+    if (x <= GAP_L + 10 && x > e.x)
+      e = {(int16_t) x, t.base, t.x, t.top};
+  }
+  return e;
 }
 
 // Birch i's crown: its rows from the top, and the leafy one's half width
