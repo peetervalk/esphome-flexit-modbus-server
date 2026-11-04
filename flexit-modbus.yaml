@@ -145,8 +145,11 @@ text_sensor:
       name: "Reset reason"
 
 binary_sensor:
-  - id: !remove alarm_return_water_sensor_faulty
-  - id: !remove alarm_water_coil_faulty
+  # Kept but hidden from HA, not removed: the package's alarm callback refers to every alarm by id
+  - id: !extend alarm_return_water_sensor_faulty
+    internal: true
+  - id: !extend alarm_water_coil_faulty
+    internal: true
 
   - platform: status
     name: "Status"
