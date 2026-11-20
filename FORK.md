@@ -12,7 +12,7 @@ this page says otherwise.
 
 ## Summary
 
-Status as of 2026-11-05, with upstream `main` merged at `46abb68` (PR #51).
+Status as of 2026-11-20, with upstream `main` merged at `f59ccfa` (PR #65).
 
 | Change | Files | Proposed upstream? |
 |---|---|---|
@@ -119,6 +119,8 @@ of `pbus.c`.
 - `git diff main live` shows everything this fork changes.
 - An upstream change next to `flexit_ref` or `external_components` in
   `packages/core.yaml` merges with a conflict. Keep this fork's two lines.
+  Upstream's own default is `flexit_ref: release`, a branch this fork doesn't
+  have, so `live` has to stay.
 - A new package that loads a component from upstream's repo at `flexit_ref`
   merges without a conflict and then fails on `live`. After a merge,
   `git grep 'MSkjel/esphome-flexit-modbus-server.*flexit_ref' -- packages`
