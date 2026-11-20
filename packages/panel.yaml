@@ -49,6 +49,11 @@ interval:
   - interval: 20ms
     then:
       - lambda: flexit::panel::loop();
+  # fetch.h's askers, the weather's and the space pictures', each once it's due. Not while the panel's picture is
+  # being made or sent, which would slow TLS's handshake past its timeout.
+  - interval: 1s
+    then:
+      - lambda: flexit::panel::fetch::tick(flexit::panel::picture::S.phase > flexit::panel::picture::START);
 
 binary_sensor:
   - platform: template
@@ -100,11 +105,11 @@ text_sensor:
     update_interval: never
 
 event:
-  # fired when one of these is picked in the panel's menu
+  # fired when one of these is picked in the panel's menu, and message_closed when a notification is closed on it
   - platform: template
     id: panel_action
     name: "Panel Action"
-    event_types: [reset_filter, reset_alarms, clear_history, factory_reset]
+    event_types: [reset_filter, reset_alarms, clear_history, factory_reset, message_closed]
 
 # The panel's settings show what it reports, unknown until it has, and what's set from here. The rest of them are in
 # its own menu and the panel_set action.
@@ -205,6 +210,7 @@ button:
     id: panel_restart
     name: "Panel Restart"
     entity_category: config
+    disabled_by_default: true
     icon: "mdi:restart"
     on_press:
       - lambda: flexit::panel::link::send(K_ACTION, A_RESTART);
@@ -212,11 +218,13 @@ button:
 api:
   actions:
     # in Home Assistant: esphome.<device>_panel_notify etc.
-    # A notification. level is info, warning or alarm, icon an id from code/panel/plink_icons.h in lower case.
+    # A notification. level is info, warning or alarm, icon an id from code/panel/plink_icons.h in lower case. While
+    # it's open the panel stays awake, without its screensaver, for stay seconds, -1 until it's closed, 0 not at all.
+    # Closed, "Panel Action" says message_closed. stay is new and required, so older automations need stay: 0.
     - action: panel_notify
-      variables: &notify {message: string, icon: string, level: string}
+      variables: &notify {message: string, icon: string, level: string, stay: int}
       then: &do_notify
-        - lambda: flexit::panel::notify(message, icon, level);
+        - lambda: flexit::panel::notify(message, icon, level, stay);
     # Lines on the screensaver in place of the temperatures, in the modes that show them. sizes in px, 16, 20 or 28,
     # one for each line, 16 for those without. No lines bring the temperatures back.
     - action: panel_saver_text
@@ -238,94 +246,90 @@ api:
       then: &do_clear_picture
         - lambda: flexit::panel::picture::clear();
     # an animation from packages/panel/animation.yaml, over the picture, where its yaml puts it, like its switch.
-    # The panel holds 6 at a time in 8 KB and shows them in up to 8 places. No name clears them all.
+    # The panel holds 7 at a time in 8.75 KB and shows them in up to 9 places. No name clears them all.
     - action: panel_show_animation
       variables: *by_name
       then: &do_show_animation
-        - lambda: flexit::panel::anim::show(name);
+        - lambda: flexit::panel::overlay::show(name);
     - action: panel_clear_animation
       variables: *by_name
       then: &do_clear_animation
-        - lambda: flexit::panel::anim::clear(name);
+        - lambda: flexit::panel::overlay::clear(name);
     # copy 0 is the one panel_show_animation shows. Another copy at x, y plays in step with it, unless own = true
-    # gives it a frame of its own (w x h / 2 bytes more of the 8 KB) that starts `start` frames in.
+    # gives it a frame of its own (w x h / 2 bytes more of the 8.75 KB) that starts `start` frames in.
     - action: panel_place_animation
       variables: &place_animation {name: string, copy: int, x: int, y: int, own: bool, start: int}
       then: &do_place_animation
-        - lambda: flexit::panel::anim::place(name, copy, x, y, own, start);
+        - lambda: flexit::panel::overlay::place(name, copy, x, y, own, start);
     - action: panel_remove_animation
       variables: &remove_animation {name: string, copy: int}
       then: &do_remove_animation
-        - lambda: flexit::panel::anim::remove(name, copy);
+        - lambda: flexit::panel::overlay::remove(name, copy);
     # move a copy: glide to x, y over ms (0 jumps, 65535 at most), or drift at vx, vy px/s round the screen.
     # ease: none, in, out or both
     - action: panel_move_animation
       variables: &move_animation {name: string, copy: int, x: int, y: int, ms: int, ease: string}
       then: &do_move_animation
-        - lambda: flexit::panel::anim::move(name, copy, x, y, ms, ease);
+        - lambda: flexit::panel::overlay::move(name, copy, x, y, ms, ease);
     - action: panel_drift_animation
       variables: &drift_animation {name: string, copy: int, vx: float, vy: float}
       then: &do_drift_animation
-        - lambda: flexit::panel::anim::drift(name, copy, vx, vy);
-    # what: x, y, turn, size, opacity or speed
+        - lambda: flexit::panel::overlay::drift(name, copy, vx, vy);
+    # what: x, y, pan_x, pan_y, w, h, turn, size, size_x, size_y, opacity, speed or light
     - action: panel_glide_animation
       variables: &glide_animation {name: string, copy: int, what: string, to: int, ms: int, ease: string}
       then: &do_glide_animation
-        - lambda: flexit::panel::anim::glide(name, copy, what, to, ms, ease);
-    - action: panel_spin_animation
-      variables: &spin_animation {name: string, copy: int, speed: float}
-      then: &do_spin_animation
-        - lambda: flexit::panel::anim::spin(name, copy, speed);
-    - action: panel_flip_animation
-      variables: &flip_animation {name: string, copy: int, horizontal: bool, vertical: bool}
-      then: &do_flip_animation
-        - lambda: flexit::panel::anim::flip(name, copy, horizontal, vertical);
+        - lambda: flexit::panel::overlay::glide(name, copy, what, to, ms, ease);
+    # colour: like FF77BB, the copy's colours as shades of it. "" or none for its own.
+    - action: panel_tint_animation
+      variables: &tint_animation {name: string, copy: int, colour: string}
+      then: &do_tint_animation
+        - lambda: flexit::panel::overlay::tint(name, copy, colour);
     # edge_x, edge_y: screen, cross or bounce
     - action: panel_area_animation
       variables: &area_animation
         {name: string, copy: int, left: int, top: int, right: int, bottom: int, edge_x: string, edge_y: string}
       then: &do_area_animation
-        - lambda: flexit::panel::anim::area(name, copy, left, top, right, bottom, edge_x, edge_y);
+        - lambda: flexit::panel::overlay::area(name, copy, left, top, right, bottom, edge_x, edge_y);
     - action: panel_wander_animation
       variables: &wander_animation
         {name: string, copy: int, speed_min: float, speed_max: float, heading: int, spread: int, leg_min: int,
          leg_max: int, rest_min: int, rest_max: int}
       then: &do_wander_animation
         - lambda: |-
-            flexit::panel::anim::wander(name, copy, speed_min, speed_max, heading, spread, leg_min, leg_max, rest_min,
+            flexit::panel::overlay::wander(name, copy, speed_min, speed_max, heading, spread, leg_min, leg_max, rest_min,
                                         rest_max);
     - action: panel_face_animation
       variables: &face_animation {name: string, copy: int, facing: int, mirror: bool, tilt: int, rate: int, level: bool}
       then: &do_face_animation
-        - lambda: flexit::panel::anim::face(name, copy, facing, mirror, tilt, rate, level);
-    # slow: none, low, high or both
-    - action: panel_wave_animation
-      variables: &wave_animation
-        {name: string, copy: int, what: string, low: int, high: int, rise: int, fall: int, hold_high: int,
-         hold_low: int, jitter: int, random: bool, slow: string}
-      then: &do_wave_animation
-        - lambda: |-
-            flexit::panel::anim::wave(name, copy, what, low, high, rise, fall, hold_high, hold_low, jitter, random,
-                                      slow);
-    - action: panel_map_animation
-      variables: &map_animation {name: string, copy: int, what: string, left: int, right: int, top: int, bottom: int}
-      then: &do_map_animation
-        - lambda: flexit::panel::anim::map(name, copy, what, left, right, top, bottom);
+        - lambda: flexit::panel::overlay::face(name, copy, facing, mirror, tilt, rate, level);
     - action: panel_rounds_animation
       variables: &rounds_animation {name: string, copy: int, rounds: int}
       then: &do_rounds_animation
-        - lambda: flexit::panel::anim::rounds(name, copy, rounds);
+        - lambda: flexit::panel::overlay::rounds(name, copy, rounds);
+    # one statement of a script, told the copy while its script runs on: what moves, shows or binds it, like
+    # "spin 90", "flip x", "blend add", "pivot 50, 100", "wave size 90, 110, 800, 800", "smooth on" or
+    # "opacity *= 50 + sin(ms / 9, 50)", see docs/panel.md#animation-scripts
+    - action: panel_tell_animation
+      variables: &tell_animation {name: string, copy: int, statement: string}
+      then: &do_tell_animation
+        - lambda: flexit::panel::overlay::told(name, copy, statement);
+    # a script the copy runs on the panel, see docs/panel.md#animation-scripts. One that plays frames needs own.
+    - action: panel_script_animation
+      variables: &script_animation {name: string, copy: int, code: string}
+      then: &do_script_animation
+        - lambda: flexit::panel::overlay::script(name, copy, code);
     - action: panel_frame_rate_animation
       variables: &frame_rate_animation {name: string, percent: int}
       then: &do_frame_rate_animation
-        - lambda: flexit::panel::anim::frame_rate(name, percent);
+        - lambda: flexit::panel::overlay::frame_rate(name, percent);
     # A panel setting by its lower-case id, value in the panel's own units: see docs/panel.md#panel-settings
     - action: panel_set
       variables: &set {setting: string, value: int}
       then: &do_set
         - lambda: flexit::panel::set(setting, value);
 
-# The same for your own YAML, like script.execute: {id: panel_notify, message: Hi, icon: bell, level: info}
+# The same for your own YAML, like script.execute: {id: panel_notify, message: Hi, icon: bell, level: info, stay: 0}
 script:
   - {id: panel_notify, parameters: *notify, then: *do_notify}
   - {id: panel_saver_text, parameters: *saver_text, then: *do_saver_text}
@@ -340,12 +344,11 @@ script:
   - {id: panel_move_animation, parameters: *move_animation, then: *do_move_animation}
   - {id: panel_drift_animation, parameters: *drift_animation, then: *do_drift_animation}
   - {id: panel_glide_animation, parameters: *glide_animation, then: *do_glide_animation}
-  - {id: panel_spin_animation, parameters: *spin_animation, then: *do_spin_animation}
-  - {id: panel_flip_animation, parameters: *flip_animation, then: *do_flip_animation}
+  - {id: panel_tint_animation, parameters: *tint_animation, then: *do_tint_animation}
   - {id: panel_area_animation, parameters: *area_animation, then: *do_area_animation}
   - {id: panel_wander_animation, parameters: *wander_animation, then: *do_wander_animation}
   - {id: panel_face_animation, parameters: *face_animation, then: *do_face_animation}
-  - {id: panel_wave_animation, parameters: *wave_animation, then: *do_wave_animation}
-  - {id: panel_map_animation, parameters: *map_animation, then: *do_map_animation}
   - {id: panel_rounds_animation, parameters: *rounds_animation, then: *do_rounds_animation}
+  - {id: panel_tell_animation, parameters: *tell_animation, then: *do_tell_animation}
+  - {id: panel_script_animation, parameters: *script_animation, then: *do_script_animation}
   - {id: panel_frame_rate_animation, parameters: *frame_rate_animation, then: *do_frame_rate_animation}

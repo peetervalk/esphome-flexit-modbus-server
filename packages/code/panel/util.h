@@ -1,10 +1,15 @@
 // What the panel's headers share: entities from id(), RAM, the loop's time slice and status texts
 #pragma once
+#include <strings.h>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
+#include "pbus.h"
 
 namespace flexit::panel {
 
@@ -37,10 +42,13 @@ inline uint32_t slice_deadline_us() {
 
 // Whether a piece of work that can't stop halfway may start, cost_us what it took last time, UINT32_MAX if not known.
 // It fits what's left of the slice, or as the first such piece in the loop it can't reach the status broadcast: past
-// the slice, but the main loop only waits once. One of a cost not known waits for the quiet right after a broadcast.
+// the slice, but the main loop only waits once. One of a cost not known waits for the quiet right after a broadcast,
+// and so does one that took as long as the bus is ever quiet, as one timed while something else held the processor
+// did: it would never fit again.
 inline bool fits(uint32_t deadline_us, uint32_t cost_us, bool first) {
   uint32_t now = micros(), left = (int32_t) (deadline_us - now) > 0 ? deadline_us - now : 0;
-  return cost_us <= left || (first && quiet_us() >= (cost_us == UINT32_MAX ? QUIET_LONG_US : cost_us));
+  uint32_t quiet = cost_us >= PBUS_CYCLE_US - STATUS_MARGIN_US ? QUIET_LONG_US : cost_us;
+  return cost_us <= left || (first && quiet_us() >= quiet);
 }
 
 // id() is a pointer in ESPHome's lambdas and a reference in the sim's harness
@@ -49,14 +57,69 @@ template<typename T> T *ptr_of(T &r) { return &r; }
 
 template<typename T> void drop(std::vector<T> &v) { std::vector<T>().swap(v); }  // empty, with its RAM freed
 
-// HTTPS requests in tasks of their own, met.h's and picture_online.h's, whose TLS buffers come and go meanwhile
+inline std::string lower(std::string s) {
+  for (auto &c : s)
+    c = (char) tolower((unsigned char) c);
+  return s;
+}
+
+// Index of name in names, in any case, or -1
+template<size_t N> int find(const char *const (&names)[N], const std::string &name) {
+  for (size_t i = 0; i < N; i++)
+    if (!strcasecmp(names[i], name.c_str()))
+      return (int) i;
+  return -1;
+}
+
+// fetch.h's requests in tasks of their own, whose TLS buffers come and go meanwhile
 inline std::atomic<int> requests{0};
 inline constexpr size_t REQUEST_RAM = 24 * 1024;
 
-// Whether the ESP has `bytes` free with some to spare, `block` of it in one piece
-inline bool has_ram(size_t bytes, size_t block) {
-  RAMAllocator<uint8_t> ram(RAMAllocator<uint8_t>::ALLOC_INTERNAL);  // vectors and new come from there, not PSRAM
-  return ram.get_free_heap_size() >= bytes + 8192 + requests * REQUEST_RAM && ram.get_max_free_block_size() >= block;
+// PSRAM's free bytes and its biggest piece, none without psram: in the yaml
+inline std::pair<size_t, size_t> psram_left() {
+#ifdef USE_PSRAM
+  RAMAllocator<uint8_t> ps(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+  return {ps.get_free_heap_size(), ps.get_max_free_block_size()};
+#else
+  return {0, 0};
+#endif
+}
+
+// Whether PSRAM has `bytes` free, `block` of them in one piece
+inline bool psram_has(size_t bytes, size_t block) {
+  auto [left, piece] = psram_left();
+  return left >= bytes && piece >= block;
+}
+
+// What has_ram() leaves free of internal RAM: some for the rest of the ESP, and a request's while one runs
+inline size_t ram_spare() { return 8192 + requests * REQUEST_RAM; }
+
+// Whether the ESP has `bytes` of internal RAM free with ram_spare() left, `block` of it in one piece: vectors and
+// new come from there. `big` more, `big_block` the biggest, are RAMAllocator's blocks, which go in PSRAM if it has
+// room
+inline bool has_ram(size_t bytes, size_t block, size_t big = 0, size_t big_block = 0) {
+  if (big && psram_has(big, big_block))
+    big = big_block = 0;
+  RAMAllocator<uint8_t> ram(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
+  return ram.get_free_heap_size() >= bytes + big + ram_spare() &&
+         ram.get_max_free_block_size() >= std::max(block, big_block);
+}
+
+// Where RAMAllocator's blocks of `bytes`, `block` the biggest, go: internal RAM while it has them to spare, PSRAM
+// when it hasn't. 0 when neither has the room
+inline uint8_t room_for(size_t bytes, size_t block) {
+  using A = RAMAllocator<uint8_t>;
+  return has_ram(bytes, block) ? A::ALLOC_INTERNAL : psram_has(bytes, block) ? A::ALLOC_EXTERNAL : 0;
+}
+
+// The RAM the ESP has, for the log
+inline std::string ram_left() {
+  auto kb = [](size_t left, size_t piece) {
+    return std::to_string(left / 1024) + " KB free, " + std::to_string(piece / 1024) + " KB in one piece";
+  };
+  RAMAllocator<uint8_t> ram(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
+  auto [left, piece] = psram_left();
+  return kb(ram.get_free_heap_size(), ram.get_max_free_block_size()) + (left ? ", PSRAM " + kb(left, piece) : "");
 }
 
 // A status text sensor, published only when it changes
@@ -66,8 +129,9 @@ template<typename T> void status(T &sensor, const std::string &s) {
 }
 
 // The status for a K_PIC_ACK's progress, len bytes in all
+inline int percent(uint32_t ack, uint32_t len) { return (int) std::min<uint32_t>(99, (ack & 0xFFFF) * 100 / len); }
 inline std::string progress(const std::string &name, uint32_t ack, uint32_t len) {
-  return "Sending " + name + ": " + std::to_string(std::min<uint32_t>(99, (ack & 0xFFFF) * 100 / len)) + " %";
+  return "Sending " + name + ": " + std::to_string(percent(ack, len)) + " %";
 }
 
 // Also in picture::, where met's code uses them
@@ -77,6 +141,8 @@ using panel::fits;
 using panel::has_ram;
 using panel::progress;
 using panel::ptr_of;
+using panel::ram_left;
+using panel::room_for;
 using panel::status;
 }  // namespace picture
 

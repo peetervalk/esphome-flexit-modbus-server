@@ -1,4 +1,4 @@
-# Classic ESP32 with a DE pin, the TCP bridge, the panel packages and an online picture
+# Classic ESP32 with a DE pin, the TCP bridge, the panel packages, an online picture, a rover and PSRAM
 esphome:
   name: flexit-ci-esp32
 
@@ -8,6 +8,8 @@ esp32:
     type: esp-idf
     sdkconfig_options:
       CONFIG_UART_ISR_IN_IRAM: "y"
+
+psram:  # boots without the chip too
 
 logger:
 
@@ -23,6 +25,9 @@ packages:
   panel_online_picture: !include
     file: ../packages/panel/online_picture.yaml
     vars: {name: radar, url: "http://homeassistant.local:8123/local/radar.png"}
+  panel_perseverance: !include  # here, the C3's flash is the fuller
+    file: ../packages/panel/rover.yaml
+    vars: {rover: perseverance}
 
 flexit_modbus_server:
   - id: !extend server

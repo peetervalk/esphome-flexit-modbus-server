@@ -1,31 +1,26 @@
 // Pictures from a URL (online_picture.yaml, ha_picture.yaml). Downloaded when shown and every `every` while
 // shown, their pixels freed once converted. A failed download goes again 30 s later, then twice as long each time
 // up to 30 min, since each try holds up the main loop until the server answers or http_request times out. Before a
-// download a task of its own asks the server about the file, hanging up after the headers, so fits() can tell
-// whether it fits. The download then starts right after the CX60's status broadcast, so a quick server has
-// answered before the link's next window.
+// download fetch.h asks the server about the file, hanging up after the headers, so fits() can tell whether it fits.
+// The download then starts right after the CX60's status broadcast, so a quick server has answered before the link's
+// next window.
 #pragma once
 #include <algorithm>
-#include <atomic>
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <memory>
 #include <string>
-#include <vector>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "dates.h"
+#include "fetch.h"
 #include "picture.h"
 
 namespace flexit::panel::picture {
 
-struct Online {
+struct Online : fetch::Caller {
   std::string url;
-  // the file's HTTP status (0 = no answer), size (0 = unknown) and Content-Type
-  std::function<int(const std::string &url, size_t &size, std::string &type)> head;
   std::function<bool()> busy;   // a download still runs
   std::function<bool()> fetch;  // starts the download, true if it did
   std::string format;           // the yaml's, upper case: JPEG, JPG, PNG, BMP or AUTO
@@ -39,18 +34,26 @@ struct Online {
   uint32_t every = 0;         // ms between downloads while shown, 0 = only when shown
   uint32_t fetched = 0;       // when the last one started
   uint32_t at = 0, wait = 0;  // when to try again after a failure, and the wait after that one
-  // head()'s answer, from its task. The task has url and the rest while asking is ASKING, the loop once ANSWERED.
+  // The server's answer about the file
   struct Answer {
-    std::string url;
-    int code = 0;
-    size_t size = 0;
+    int code = 0;     // its HTTP status, 0 = no answer, -1 = no RAM to ask
+    size_t size = 0;  // 0 = it doesn't say
     std::string type;
     uint32_t wait = 0;  // the wait before this ask, back if the answer is dropped
   } answer;
-  enum { IDLE, ASKING, ANSWERED };
-  std::atomic<int> asking{IDLE};
+  enum { IDLE, ASKING, ANSWERED } asking = IDLE;
+
+  void answered(fetch::Request *r) override {
+    answer.code = r->no_ram ? -1 : r->status;
+    answer.size = r->length;
+    answer.type = r->type;
+    delete r;
+    asking = ANSWERED;
+  }
 };
 inline std::map<std::string, std::shared_ptr<Online>> online;
+// fetch::send, once add_online_image() has a picture, so a build without one leaves the HTTP client out
+inline void (*ask_server)(fetch::Request *r) = nullptr;
 
 // "30s", "10min", "1.5h", "1d" as ESPHome writes them. 0 = never, also for anything else.
 inline uint32_t interval_ms(const char *s) {
@@ -67,7 +70,7 @@ inline uint32_t interval_ms(const char *s) {
     if (end != s && !strcmp(end, u.unit))
       return n > 0 ? (uint32_t) std::min(n * u.ms, 4e9) : 0;
   if (strcmp(s, "never"))
-    ESP_LOGE("panel", "update_interval '%s' isn't a time like 10min, so it's only downloaded when shown", s);
+    ESP_LOGE("panel", "'%s' isn't a time like 10min, 1.5h or never, so it's taken as never", s);
   return 0;
 }
 
@@ -83,10 +86,8 @@ inline std::string again(const Online &o) {
 // in a buffer it only grows, PNG and BMP stream through it. A new decoder: JPEG 17 KB, PNG 44 KB in one piece.
 inline bool fits(const std::string &name, Online &o) {
   size_t n = o.answer.size;
-  std::string type = o.answer.type, why, ram;  // ram: what the ESP has, for the log
+  std::string type = lower(o.answer.type), why, ram;  // ram: what the ESP has, for the log
   int code = o.answer.code;
-  for (auto &c : type)
-    c = (char) tolower((unsigned char) c);
   auto is = [&](const char *f, const char *t) {
     return o.format == f || (o.format == "AUTO" && type.find(t) != std::string::npos);
   };
@@ -94,15 +95,19 @@ inline bool fits(const std::string &name, Online &o) {
   bool jpeg = kind == 'J';
   size_t dec = kind == o.kept.decoder || kind == 'B' ? 0 : jpeg ? 17 * 1024 : 44 * 1024;  // a new decoder
   size_t grow = jpeg && n > o.kept.buffer ? n : 0, need = grow + dec + o.pixels + MAKE_RAM;
+  // The buffer, the pixels and a PNG's decoder come from RAMAllocator, in PSRAM if it has room, a JPEG's from new
+  size_t own = MAKE_RAM + (jpeg ? dec : 0), big = need - own;
+  size_t big_block = std::max({grow, jpeg ? 0 : dec, (size_t) o.pixels});
   if (code != 200) {
-    why = (code > 0 ? "the server says " + std::to_string(code) : "couldn't reach the server") + again(o);
+    why = (code > 0   ? "the server says " + std::to_string(code)
+           : code < 0 ? "no RAM to ask the server"
+                      : "couldn't reach the server") +
+          again(o);
   } else if (jpeg && !n) {
     why = "the server doesn't say how big it is, which a JPEG needs";
-  } else if (!has_ram(need, std::max({grow, dec, (size_t) o.pixels}))) {
-    RAMAllocator<uint8_t> a;
+  } else if (!has_ram(own, jpeg ? dec : 0, big, big_block)) {
     why = "too big for the ESP, it needs " + std::to_string(need / 1024) + " KB of RAM";
-    ram = ". It has " + std::to_string(a.get_free_heap_size() / 1024) + " KB free, " +
-          std::to_string(a.get_max_free_block_size() / 1024) + " KB in one piece";
+    ram = ". It has " + ram_left();
   }
   if (why.empty()) {
     o.next = {std::max(o.kept.buffer, grow), kind};
@@ -114,16 +119,6 @@ inline bool fits(const std::string &name, Online &o) {
   return false;
 }
 
-inline constexpr uint32_t ASK_STACK = 8192;  // for TLS's handshake, like met.h's request
-
-// A question to a server in its task, or a download on the loop, never both: http_request sets the task watchdog
-// back to its default when a request ends, which would cut short the longer one the other has
-inline bool asking() {
-  for (auto &it : online)
-    if (it.second->asking == Online::ASKING)
-      return true;
-  return false;
-}
 inline bool downloading() {
   for (auto &it : online)
     if (it.second->busy())
@@ -131,19 +126,8 @@ inline bool downloading() {
   return false;
 }
 
-inline void ask(Online &o) {
-  o.answer.code = o.head(o.answer.url, o.answer.size, o.answer.type);
-  o.asking.store(Online::ANSWERED);  // o.answer is the loop's from here on
-  requests--;
-}
-
-inline void ask_task(void *arg) {
-  ask(*(Online *) arg);
-  vTaskDelete(nullptr);
-}
-
-// Asks the server about the file, and refresh() starts the download once it has answered, if it fits. The wait
-// before size() tries again doubles until one comes.
+// Asks the server about the file, ahead of what the askers wait for, and refresh() starts the download once it has
+// answered, if it fits. The wait before size() tries again doubles until one comes.
 inline void download(const std::string &name, Online &o) {
   if (!o.busy() && downloading())  // another one's, asked once it's done
     return;
@@ -155,16 +139,21 @@ inline void download(const std::string &name, Online &o) {
   o.at = millis() + o.wait;
   if (name == S.want)
     S.waiting = "asking the server about it";
-  o.answer.url = o.url;
-  o.asking.store(Online::ASKING);
-  requests++;
-  if (xTaskCreate(ask_task, "picture", ASK_STACK, &o, 1, nullptr) != pdPASS)
-    ask(o);  // no RAM for its stack, so it holds up the loop
+  o.asking = Online::ASKING;
+  auto *r = fetch::request<fetch::Request>(o.url);
+  if (!r) {
+    o.answer.code = -1;
+    o.asking = Online::ANSWERED;
+    return;
+  }
+  r->body = false;
+  r->by = &o;
+  ask_server(r);
 }
 
 // The server has answered: the download starts if it fits, false if not
-inline bool answered(const std::string &name, Online &o) {
-  o.asking.store(Online::IDLE);
+inline bool start_download(const std::string &name, Online &o) {
+  o.asking = Online::IDLE;
   if (!fits(name, o))
     return false;
   if (name == S.want)
@@ -174,35 +163,20 @@ inline bool answered(const std::string &name, Online &o) {
   return true;
 }
 
-// No request headers for http_request's get(), where {} would match its old std::list overload too
-struct NoHeaders {
-  template<typename T> operator std::vector<T>() const { return {}; }
-};
-
-// http is online_picture.yaml's http_request
-template<typename Img, typename Http>
-void add_online_image(const std::string &name, Img &&image, Http &&http, const char *url, const char *every,
-                      const char *format, const char *resize, const char *encoding, const char *quality) {
+template<typename Img>
+void add_online_image(const std::string &name, Img &&image, const char *url, const char *every, const char *format,
+                      const char *resize, const char *encoding, const char *quality) {
+  ask_server = [](fetch::Request *r) { fetch::send(r, true); };
   auto *img = ptr_of(image);
-  auto *web = ptr_of(http);
   auto o = std::make_shared<Online>();
   o->url = url;
   o->every = interval_ms(every);
   for (const char *c = format; *c; c++)
     o->format += (char) toupper((unsigned char) *c);
-  int rw = 0, rh = 0;
-  if (sscanf(resize, "%dx%d", &rw, &rh) == 2 && rw > 0 && rh > 0)
+  const char *r = resize;
+  int rw = next_int(r), rh = *r == 'x' ? next_int(r) : -1;  // "160x120"
+  if (rw > 0 && rh > 0)
     o->pixels = (uint32_t) rw * rh * 2;  // RGB565
-  o->head = [web](const std::string &url, size_t &size, std::string &type) {
-    auto c = web->get(url, NoHeaders(), {"content-type"});
-    if (!c)
-      return 0;
-    int code = c->status_code;
-    size = c->content_length;
-    type = c->get_response_header("content-type");
-    c->end();  // hangs up after the headers
-    return code;
-  };
   o->busy = [img]() { return img->is_decoding(); };
   o->fetch = [img]() {
     img->update();
@@ -211,8 +185,7 @@ void add_online_image(const std::string &name, Img &&image, Http &&http, const c
   online[name] = o;
   Source s;
   s.size = [img, o, name](int &w, int &h) {  // starts the download if there's nothing yet, we get asked again
-    w = img->get_width();
-    h = img->get_height();
+    dims_of(img, w, h);
     if (img->is_decoding())
       return false;
     if (w > 0 && h > 0) {
@@ -237,8 +210,7 @@ void add_online_image(const std::string &name, Img &&image, Http &&http, const c
     if (!img->is_decoding())  // a new download keeps its buffer
       img->release();
   };
-  s.encoding = encoding_of(encoding);
-  s.quality = quality_of(quality);
+  s.coding(encoding, quality);
   add(name, s);
 }
 
@@ -264,10 +236,10 @@ inline void refresh() {
     if (o.asking != Online::ANSWERED)
       continue;
     if (it.first != S.want) {
-      o.asking.store(Online::IDLE);  // picked away meanwhile, asked again right away once it's shown
+      o.asking = Online::IDLE;  // picked away meanwhile, asked again right away once it's shown
       o.wait = o.answer.wait;
       o.at = millis();
-    } else if (quiet_ahead() && !asking() && (!answered(it.first, o) || S.phase != IDLE)) {
+    } else if (quiet_ahead() && (!start_download(it.first, o) || S.phase != IDLE)) {
       status(S.want + ": " + S.waiting);  // a shown one stays while the next downloads
     }
   }

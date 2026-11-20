@@ -1,27 +1,20 @@
-// met_scene.h as a panel picture. met.yaml calls fetch() for the forecast, poll() for its answer and redraw()
-// every few minutes so the sun and moon move. Only changed rows are sent to the panel. MET Norway is asked again
-// once its last answer has expired, with If-Modified-Since, in a task of its own so the bus is still answered, soon
-// again after a server error and less often while it refuses or doesn't answer, see fetched() and unreachable(). The
-// forecast is kept through all of that until it runs out.
+// met_scene.h as a panel picture, the forecast over it with marks.h. met.yaml calls redraw() every few minutes so the
+// sun and moon move. Only changed rows are sent to the panel. MET Norway is asked for the forecast through fetch.h,
+// again once its last answer has expired, with If-Modified-Since, soon again after a server error and less often while
+// it refuses or doesn't answer, see Forecasts::got() and fetch::Schedule. The forecast is kept through all of that
+// until it runs out. NOAA is asked for the Kp every 3 hours while the aurora is on, see KpIndex.
 #pragma once
-#include <esp_crt_bundle.h>
-#include <esp_http_client.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <strings.h>
 #include <algorithm>
-#include <cctype>
-#include <cstdlib>
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <functional>
-#include <new>
 #include <string>
+#include "../panel/fetch.h"
 #include "../panel/items.h"
 #include "../panel/picture.h"
-#include "met_live_shows.h"
+#include "../panel/picture_marks.h"
+#include "met_kp.h"
+#include "met_live_cast.h"
 #include "met_raster.h"
 
 // True in fireplace mode. Weak, since packages/code/fireplace.h only defines it when that package is included.
@@ -30,6 +23,7 @@ extern "C" bool flexit_fireplace_active() __attribute__((weak));
 namespace flexit::panel::met {
 
 inline Weather weather;  // the forecast, from the coming hour on
+inline Sea sea;          // the waves, from Oceanforecast. Not ok where MET Norway has none: inland, or outside its area
 
 // The dashboard tile's label and icon for each Icon
 struct Kind {
@@ -40,26 +34,12 @@ inline constexpr Kind KINDS[] = {{"Weather|Vær", "cloud"},   {"Clear|Klart", "s
                                  {"Rain|Regn", "rain"},      {"Snow|Snø", "snowy"},       {"Sleet|Sludd", "rain"},
                                  {"Thunder|Torden", "bolt"}, {"Fog|Tåke", "cloud"}};
 static_assert(std::size(KINDS) == I_FOG + 1, "a name and an icon for each of met_forecast.h's Icons");
-// MET Norway wants to know who's asking
-inline constexpr const char *USER_AGENT =
-    "esphome-flexit-modbus-server (github.com/MSkjel/esphome-flexit-modbus-server)";
-// The request's task: TLS's handshake, then the reader's 4 KB buffer in the same room. As big as ESPHome's main
-// loop's, which also does HTTPS.
-inline constexpr uint32_t STACK = 8192;
 inline int now_item = -1;
-inline std::string modified;  // Last-Modified of our forecast, for If-Modified-Since. Empty until we have one
-inline uint32_t not_before;   // no request before this (Unix time): the last answer's Expires, or a back-off
-inline uint32_t backoff_s;    // doubles with each failure in a row
-inline bool answered;         // MET Norway has answered since boot
-inline uint8_t early_tries;   // quick retries before that
-inline bool retry_soon;       // one of those is due, tick() makes it
-inline constexpr uint32_t EARLY_RETRY_S = 30;
-inline char url[128];
 inline double lat, lon;
-inline int timeout_ms;  // http_request's
 inline std::string name;
 inline bool with_forecast;    // the Panel Weather Forecast switch
 inline Options options;       // set from met.yaml
+inline SnowCover snow_cover;  // the snow on the ground
 inline uint32_t pal[16];      // the scene's colours, for picture.h
 inline picture::Parts parts;  // and its parts
 
@@ -73,10 +53,56 @@ template<size_t N> int option_of(const char *const (&names)[N], const char *name
 }
 inline Ground ground_of(const char *name) { return (Ground) option_of(GROUNDS, name); }
 inline Aurora aurora_of(const char *name) { return (Aurora) option_of(AURORAS, name); }
-// Publishes to Panel Weather, set by met.yaml's on_boot
-inline std::function<void(const std::string &)> on_status = [](const std::string &) {};
 
-inline uint32_t now_s() { return (uint32_t) id(flexit_panel_time).now().timestamp; }
+// A request for the forecast, and what's read from its answer
+struct Ask : fetch::Request {
+  Forecast f;
+  bool feed(const char *p, size_t n) override { return f.feed(p, n); }
+};
+
+// MET Norway, asked through fetch.h. Panel Weather is its status.
+struct Forecasts : fetch::Asker {
+  std::string modified;  // Last-Modified of our forecast, for If-Modified-Since. Empty until we have one
+  char url[128];
+  fetch::Request *make(int) override;
+  bool got(fetch::Request &r) override;
+};
+inline Forecasts forecasts;
+
+// A request for the Kp, and what's read from its answer
+struct KpAsk : fetch::Request {
+  KpReader read;
+  bool feed(const char *p, size_t n) override { return read.feed(p, n); }
+};
+
+// NOAA's Kp, asked for while the aurora is on auto or always. Panel Weather Kp is its status.
+struct KpIndex : fetch::Asker {
+  fetch::Request *make(int) override { return fetch::request<KpAsk>(KP_URL); }
+  bool got(fetch::Request &r) override;
+  bool wanted() override { return options.aurora != A_OFF; }
+};
+inline KpIndex kp_index;
+inline KpBlocks kp;  // its last answer's
+
+// A request for the waves, and what's read from its answer
+struct SeaAsk : fetch::Request {
+  Waves f;
+  bool feed(const char *p, size_t n) override { return f.feed(p, n); }
+};
+
+// MET Norway's Oceanforecast, asked through fetch.h after the forecast. Inland in MET's area the answer is a 200 with
+// no hours, outside it a 422; either way it's asked again the next day. No status of its own, Panel Weather is the
+// forecast's.
+struct Seas : fetch::Asker {
+  std::string modified;
+  char url[128];
+  fetch::Request *make(int) override;
+  bool got(fetch::Request &r) override;
+  void answered(fetch::Request *r) override;
+  void none(int status);
+  bool wanted() override { return options.ground == G_COAST && with_forecast; }  // only the coast shows the waves
+};
+inline Seas seas;
 
 inline void tile(Icon icon, float temp) {
   item_label(now_item, KINDS[icon].name);
@@ -89,12 +115,13 @@ inline void tile(Icon icon, float temp) {
 inline void send_now() {
   if (!weather.ok)
     return;
-  uint32_t t = now_s();
+  uint32_t t = fetch::now_s();
   if (t >= ends(weather)) {
     weather.ok = false;
-    modified.clear();  // so the next answer is all of it
+    forecasts.modified.clear();  // so the next answer is all of it
+    forecasts.have = false;
     tile(I_NONE, NAN);
-    on_status("The forecast has run out");
+    forecasts.say("The forecast has run out");
     return;
   }
   Hour h = now_of(weather, t);
@@ -107,8 +134,8 @@ inline int utc_offset(uint32_t t) {
   return (int) (unix_of(l.year, l.month, l.day_of_month, l.hour, l.minute, l.second) - t);
 }
 
-// The scene, only while picture.h makes the picture. Its sprites and overlay are blocks of their own, the land is
-// kept while it's the panel's picture.
+// The scene, only while picture.h makes the picture. Its stamps are a block of their own, the land is kept while it's
+// the panel's picture.
 struct Drawing {
   Scene scene;
   uint8_t row[W];  // the last row pixel() drew
@@ -122,9 +149,7 @@ inline bool counting;  // drawing has it but its colours, see prepare()
 
 inline void free_drawing() {
   if (drawing) {
-    RAMAllocator<Sprite>().deallocate(drawing->scene.sprite, SPRITES);
-    if (drawing->scene.ov)
-      RAMAllocator<uint8_t>().deallocate(drawing->scene.ov[0], OV_H * W / 4);
+    RAMAllocator<Stamps>().deallocate(drawing->scene.stamps, 1);
     RAMAllocator<Drawing>().deallocate(drawing, 1);
   }
   drawing = nullptr;
@@ -136,28 +161,25 @@ inline void free_drawing() {
 }
 
 inline bool new_drawing() {
-  size_t ov_bytes = with_forecast ? OV_H * W / 4 : 0;
-  if (!picture::has_ram(sizeof(Drawing) + SPRITES * sizeof(Sprite) + ov_bytes + (land ? 0 : sizeof(Land)),
-                        sizeof(Drawing)))
+  uint8_t at = picture::room_for(sizeof(Drawing) + sizeof(Stamps) + (land ? 0 : sizeof(Land)),
+                                 sizeof(Drawing));  // internal RAM, PSRAM when that's short
+  if (!at)
     return false;
   bool new_land = !land;
-  if (new_land && (land = RAMAllocator<Land>().allocate(1)))
+  if (new_land && (land = RAMAllocator<Land>(at).allocate(1)))
     land->made = false;
-  Drawing *c = RAMAllocator<Drawing>().allocate(1);
-  Sprite *sprite = RAMAllocator<Sprite>().allocate(SPRITES);
-  uint8_t *ov = ov_bytes ? RAMAllocator<uint8_t>().allocate(ov_bytes) : nullptr;
-  if (!land || !c || !sprite || (ov_bytes && !ov)) {
+  Drawing *c = RAMAllocator<Drawing>(at).allocate(1);
+  Stamps *stamps = RAMAllocator<Stamps>(at).allocate(1);
+  if (!land || !c || !stamps) {
     RAMAllocator<Drawing>().deallocate(c, 1);
-    RAMAllocator<Sprite>().deallocate(sprite, SPRITES);
-    RAMAllocator<uint8_t>().deallocate(ov, ov_bytes);
+    RAMAllocator<Stamps>().deallocate(stamps, 1);
     if (new_land) {
       RAMAllocator<Land>().deallocate(land, 1);
       land = nullptr;
     }
     return false;
   }
-  c->scene.sprite = sprite;
-  c->scene.ov = (uint8_t (*)[W / 4]) ov;
+  c->scene.stamps = stamps;
   c->scene.land = land;
   drawing = c;
   return true;
@@ -170,8 +192,6 @@ inline bool begin() {
     picture::S.waiting = "waiting for the time from Home Assistant";
     return false;
   }
-  if (drawing && !drawing->scene.ov != !with_forecast)
-    free_drawing();  // the forecast went on or off
   if (!drawing && !new_drawing()) {
     picture::S.waiting = "no RAM to draw it";
     return false;
@@ -182,8 +202,13 @@ inline bool begin() {
   options.fireplace = flexit_fireplace_active ? flexit_fireplace_active() : false;
 #pragma GCC diagnostic pop
   options.frame++;
+  options.kp = kp.at((uint32_t) t.timestamp);
+  snow_cover.step(weather, (uint32_t) t.timestamp);
+  options.snow_cm = snow_cover.cm;
   Scene &s = drawing->scene;
+  weather.wave = wave_at(sea, (uint32_t) t.timestamp);
   build(s, weather, lat, lon, (uint32_t) t.timestamp, with_forecast, utc_offset, options);
+  marks::set(name, forecast_marks(s, weather, (uint32_t) t.timestamp, utc_offset));
   s.live = live::leaves_out(s);  // what the animations that fit it draw themselves
   drawing->colours.start(s);
   counting = true;
@@ -266,231 +291,132 @@ inline uint32_t pixel(int x, int y) {
   return c.scene.pal[c.row[x < W ? x : W - 1]];
 }
 
-// An HTTP date like "Mon, 19 Oct 2026 11:34:38 GMT" as Unix time, 0 if it isn't one
-inline uint32_t http_date(const std::string &s) {
-  static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
-  char mon[4] = {};
-  int d, y, h, mi, sec;
-  if (sscanf(s.c_str(), "%*3s, %d %3s %d %d:%d:%d", &d, mon, &y, &h, &mi, &sec) != 6)
-    return 0;
-  const char *m = strstr(MONTHS, mon);
-  if (!m || strlen(mon) != 3 || (m - MONTHS) % 3)
-    return 0;
-  return unix_of(y, (int) (m - MONTHS) / 3 + 1, d, h, mi, sec);
-}
-
-// Whether to ask MET Norway now. They want no new request before the last answer's Expires.
-// Offline it waits for the next check, a failed request would back off.
-inline bool due() { return network::is_connected() && id(flexit_panel_time).now().is_valid() && now_s() >= not_before; }
-
-// After a failure, wait first, then twice as long each time up to most
-inline void back_off(uint32_t first, uint32_t most) {
-  backoff_s = std::clamp(2 * backoff_s, first, most);
-  not_before = now_s() + backoff_s;
-}
-
-// No answer, or one cut off: more likely our own network than MET Norway, so ten minutes and up to an hour.
-// Right after boot the network often isn't quite there yet and the ESP is busy, so the first few tries go again
-// EARLY_RETRY_S later rather than at the next check.
-inline void unreachable() {
-  if (!answered && early_tries < 3) {
-    early_tries++;
-    not_before = now_s() + EARLY_RETRY_S;
-    retry_soon = true;
-  } else {
-    back_off(600, 3600);
-    retry_soon = false;
+// A request to MET that reads its answer as a T, with If-Modified-Since once there's a Last-Modified
+template<class T> fetch::Request *since(const std::string &url, const std::string &modified) {
+  auto *r = fetch::request<T>(url);
+  if (r) {
+    r->header = "If-Modified-Since";
+    r->value = modified;
   }
-  on_status("Couldn't reach MET Norway");
+  return r;
 }
 
-// A request runs in a task of its own, so the main loop keeps answering the bus through the TLS handshake and the
-// 24 KB of answer. fetch() gives it a Fetch, poll() takes the answer once fetch_done is set. Until then the task has
-// the Fetch and touches nothing else.
-struct Fetch {
-  std::string since;  // If-Modified-Since, "" for none
-  int timeout_ms;
-  int status = 0;  // 0 = no answer
-  Weather w;
-  std::string last_modified, expires, retry_after;
-  unsigned stack_left = 0;
-};
-
-// Retry-After's seconds from now, given as seconds or as an HTTP date. 0 without one.
-inline uint32_t retry_after_s(const std::string &v, uint32_t now) {
-  if (v.empty())
-    return 0;
-  if (isdigit((unsigned char) v[0]))
-    return (uint32_t) strtoul(v.c_str(), nullptr, 10);
-  uint32_t t = http_date(v);
-  return t > now ? t - now : 0;
+// The seconds until MET is asked again: at least 10 min after the answer's Expires, in case our clock is off, or an
+// hour without one
+inline uint32_t again_s(const fetch::Request &r) {
+  uint32_t now = fetch::now_s(), e = fetch::http_date(r.expires);
+  return e ? std::max(e, now + 600) - now : 3600;
 }
 
-// api.met.no's answer, 2xx with the forecast read from it into f.w, or 304 if it hasn't changed. 203 is a product
-// that's deprecated, its data is still good. A server error, 502 or 503 when it's busy, or an answer without a
-// forecast in it is usually over soon: it asks again a minute later, then twice as long each time up to half an hour.
-// Refused, it waits an hour, then twice as long each time up to 12. Longer if Retry-After says so.
-inline void fetched(const Fetch &f) {
-  answered = true;
-  retry_soon = false;
-  bool ok = f.status >= 200 && f.status < 300 && f.w.ok;
-  uint32_t now = now_s();
-  if (ok || f.status == 304) {
-    backoff_s = 0;
-    uint32_t e = http_date(f.expires);
-    not_before = e ? std::max(e, now + 600) : now + 3600;  // at least 10 min, in case our clock is off
-  } else {
-    if (f.status >= 500 || f.status < 300) {
-      back_off(60, 1800);
-      retry_soon = true;  // tick() asks when it's time, not the next check
-    } else {
-      back_off(3600, 12 * 3600);  // 429 is too many requests, 403 refused
-    }
-    not_before = std::max(not_before, now + std::min<uint32_t>(retry_after_s(f.retry_after, now), 12 * 3600));
-  }
-  if (f.status == 304) {
+inline fetch::Request *Forecasts::make(int) { return since<Ask>(url, modified); }
+
+// api.met.no's answer, 2xx with the forecast read from it, or 304 if it hasn't changed. 203 is a product that's
+// deprecated, its data is still good. A 2xx without a forecast in it counts as a server error.
+inline bool Forecasts::got(fetch::Request &r) {
+  every_s = again_s(r);
+  if (r.status == 304) {
     ESP_LOGI("met", "The forecast hasn't changed (HTTP 304)");
-    return;
+    return true;
   }
-  if (f.status == 203) {
+  if (r.status == 203) {  // braces, as ESP_LOGW can be nothing
     ESP_LOGW("met", "MET Norway says this product is deprecated");
   }
-  if (!ok) {
-    ESP_LOGW("met", "No forecast from MET Norway (HTTP %d), asking again in %u s", f.status,
-             (unsigned) (not_before - now));
-    on_status(std::string(weather.ok ? "Kept the last forecast" : "No forecast") + " (HTTP " +
-              std::to_string(f.status) + ")");
-    return;
-  }
-  const Weather &w = f.w;
+  const Weather &w = static_cast<Ask &>(r).f.w;
+  if (!w.ok)
+    return false;
   weather = w;
-  if (!f.last_modified.empty())
-    modified = f.last_modified;
+  if (!r.last_modified.empty())
+    modified = r.last_modified;
   char s[96];
   snprintf(s, sizeof s, "%s, %.1f °C, clouds %.0f %%, %.1f mm", w.symbol[0] ? w.symbol : "?", w.temp, w.cloud, w.rain);
   ESP_LOGI("met", "Weather: %s", s);
-  on_status(s);
+  say(s);
   redraw();
+  return true;
 }
 
-inline Fetch *fetching;
-inline std::atomic<bool> fetch_done;
+// NOAA's answer, with a Kp from now on in it. The aurora's redrawn by it.
+inline bool KpIndex::got(fetch::Request &r) {
+  const KpBlocks &k = static_cast<KpAsk &>(r).read.blocks;
+  uint32_t now = fetch::now_s();
+  if (!k.n || k.b[k.n - 1].t + KP_BLOCK_S <= now)
+    return false;
+  kp = k;
+  char s[64];
+  snprintf(s, sizeof s, "Kp %.1f now, the aurora needs %.1f here", kp.at(now), kp_needed(lat, lon));
+  ESP_LOGI("met", "%s", s);
+  say(s);
+  redraw();
+  return true;
+}
 
-inline esp_err_t on_header(esp_http_client_event_t *e) {
-  Fetch &f = *(Fetch *) e->user_data;
-  if (e->event_id == HTTP_EVENT_ON_HEADER) {
-    if (!strcasecmp(e->header_key, "last-modified"))
-      f.last_modified = e->header_value;
-    else if (!strcasecmp(e->header_key, "expires"))
-      f.expires = e->header_value;
-    else if (!strcasecmp(e->header_key, "retry-after"))
-      f.retry_after = e->header_value;
+inline fetch::Request *Seas::make(int) { return since<SeaAsk>(url, modified); }
+
+// No waves here: none drawn, asked again tomorrow
+inline void Seas::none(int status) {
+  every_s = 86400;
+  modified.clear();
+  bool had = sea.ok;
+  sea = Sea{};
+  if (had)
+    redraw();
+  ESP_LOGI("met", "No waves here (HTTP %d): inland, or outside MET Norway's area", status);
+}
+
+// Oceanforecast's answer, as Forecasts::got() has the forecast's. One without waves is inland, see none().
+inline bool Seas::got(fetch::Request &r) {
+  every_s = again_s(r);
+  if (r.status == 304)
+    return true;
+  const Sea &w = static_cast<SeaAsk &>(r).f.sea;
+  if (!w.ok) {
+    none(r.status);
+    return true;
   }
-  return ESP_OK;
+  sea = w;
+  if (!r.last_modified.empty())
+    modified = r.last_modified;
+  ESP_LOGI("met", "Waves: %.1f m", wave_at(sea, fetch::now_s()));
+  redraw();
+  return true;
 }
 
-// The answer, an hour at a time until there are HOURS of them. Not inlined, so its buffer takes the stack the
-// handshake had. False if the connection failed or the answer was cut short.
-__attribute__((noinline)) inline bool read_answer(esp_http_client_handle_t c, Weather &w) {
-  char buf[Reader::SIZE + 1];
-  Reader rd(buf);
-  int r;
-  bool more;
-  do {
-    size_t room;
-    char *p = rd.space(room);
-    r = esp_http_client_read(c, p, (int) room);
-    more = r <= 0 || rd.got((size_t) r);
-  } while (r > 0 && more);
-  w = rd.w;
-  return !more || (r == 0 && esp_http_client_is_complete_data_received(c));
-}
-
-inline void request(void *arg) {
-  Fetch &f = *(Fetch *) arg;
-  esp_http_client_config_t config = {};
-  config.url = url;
-  config.user_agent = USER_AGENT;
-  config.timeout_ms = f.timeout_ms;
-  config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.event_handler = on_header;
-  config.user_data = &f;
-  if (esp_http_client_handle_t c = esp_http_client_init(&config)) {
-    if (!f.since.empty())
-      esp_http_client_set_header(c, "If-Modified-Since", f.since.c_str());
-    for (int hops = 0; esp_http_client_open(c, 0) == ESP_OK && esp_http_client_fetch_headers(c) >= 0; hops++) {
-      f.status = esp_http_client_get_status_code(c);
-      bool moved = f.status == 301 || f.status == 302 || f.status == 307 || f.status == 308;
-      if (!moved || hops == 3 || esp_http_client_set_redirection(c) != ESP_OK)
-        break;
-    }
-    if (f.status >= 200 && f.status < 300 && !read_answer(c, f.w))
-      f.status = 0;              // counts as no answer, its Last-Modified isn't kept
-    esp_http_client_cleanup(c);  // TLS's buffers go with it
-  }
-  f.stack_left = uxTaskGetStackHighWaterMark(nullptr);
-  fetch_done.store(true);  // f is the loop's from here on
-  requests--;
-  vTaskDelete(nullptr);
-}
-
-// Asks for the forecast, with If-Modified-Since once we have a Last-Modified
-inline void fetch() {
-  if (fetching)
-    return;  // the last one still runs
-  RAMAllocator<Fetch> ram;
-  Fetch *f = ram.allocate(1);
-  if (f) {
-    new (f) Fetch();
-    f->since = modified;
-    f->timeout_ms = timeout_ms;
-    fetch_done.store(false);
-    fetching = f;
-    requests++;
-    if (xTaskCreate(request, "met", STACK, f, 1, nullptr) == pdPASS)
-      return;
-    requests--;
-    fetching = nullptr;
-    f->~Fetch();
-    ram.deallocate(f, 1);
-  }
-  ESP_LOGW("met", "No RAM for the forecast, %u bytes", (unsigned) (sizeof(Fetch) + STACK));
-  not_before = now_s() + 600;
-  on_status("No RAM for the forecast");
-}
-
-// The answer, once the request's task is done with it
-inline void poll() {
-  if (!fetching || !fetch_done.load())
+// A 422 is a point outside MET Norway's area, land or sea: no waves, not a refusal to back off from
+inline void Seas::answered(fetch::Request *r) {
+  if (r->status == 422) {
+    asking = nullptr;
+    none(r->status);
+    schedule.got(*r, true, every_s);
+    delete r;
     return;
-  Fetch *f = fetching;
-  fetching = nullptr;
-  ESP_LOGD("met", "The request left %u bytes of its stack", f->stack_left);
-  if (f->status)
-    fetched(*f);
-  else
-    unreachable();
-  f->~Fetch();
-  RAMAllocator<Fetch>().deallocate(f, 1);
-}
-
-// Every second from met.yaml: the answer once the task has it, and an early retry when it's time
-inline void tick() {
-  poll();
-  if (retry_soon && !fetching && due()) {
-    retry_soon = false;
-    fetch();
   }
+  fetch::Asker::answered(r);
 }
 
-// From met.yaml's on_boot, with http_request's timeout
-inline void setup(double latitude, double longitude, const char *picture, const char *encoding, const char *quality,
-                  uint32_t http_timeout_ms) {
+// From met.yaml's on_boot. status: Panel Weather, kp_status: Panel Weather Kp.
+template<typename S, typename K>
+void setup(double latitude, double longitude, const char *picture, const char *encoding, const char *quality,
+           S &&status, K &&kp_status) {
   lat = latitude;
   lon = longitude;
-  timeout_ms = (int) http_timeout_ms;
+  live::turned = redraw;
   // MET Norway wants at most 4 decimals, more can get a 403
-  snprintf(url, sizeof url, "https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=%.4f&lon=%.4f", lat, lon);
+  snprintf(forecasts.url, sizeof forecasts.url,
+           "https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=%.4f&lon=%.4f", lat, lon);
+  forecasts.what = "forecast";
+  forecasts.server = "MET Norway";
+  forecasts.status = ptr_of(status);
+  fetch::add(forecasts);
+  kp_index.what = "Kp";
+  kp_index.server = "NOAA";
+  kp_index.every_s = KP_BLOCK_S;
+  kp_index.status = ptr_of(kp_status);
+  fetch::add(kp_index);
+  snprintf(seas.url, sizeof seas.url, "https://api.met.no/weatherapi/oceanforecast/2.0/complete?lat=%.4f&lon=%.4f", lat,
+           lon);
+  seas.what = "waves";
+  seas.server = "MET Norway";
+  fetch::add(seas);  // after the forecast, so that's asked first
   name = picture;
   now_item = Item("weather", ITEM_SENSOR)
                  .view(false)
@@ -516,9 +442,9 @@ inline void setup(double latitude, double longitude, const char *picture, const 
   };
   s.parts = [] { return parts; };
   s.done = free_drawing;
-  s.encoding = picture::encoding_of(encoding);
-  s.quality = picture::quality_of(quality);
+  s.coding(encoding, quality);
   picture::add(name, s);
+  marks::on(name, "forecast");
 }
 
 }  // namespace flexit::panel::met

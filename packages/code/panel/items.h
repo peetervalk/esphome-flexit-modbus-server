@@ -1,9 +1,7 @@
 // Items are the ESP's own entities on the panel. packages/panel/ adds them at boot and the panel gets them all
 // after each hello, as the link has room. Messages are K_ITEM_* in plink_keys.h.
 #pragma once
-#include <strings.h>
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -15,21 +13,6 @@
 #include "util.h"
 
 namespace flexit::panel {
-
-inline std::string lower(const char *s) {
-  std::string r(s);
-  for (auto &c : r)
-    c = (char) tolower((unsigned char) c);
-  return r;
-}
-
-// Index of name in ids, in any case, or -1
-template<size_t N> int find(const char *const (&ids)[N], const std::string &name) {
-  for (size_t i = 0; i < N; i++)
-    if (!strcasecmp(ids[i], name.c_str()))
-      return (int) i;
-  return -1;
-}
 
 #define ID_NAME(id, ...) #id,
 inline constexpr const char *ICON_IDS[] = {PLINK_ICONS(ID_NAME)};
@@ -147,10 +130,10 @@ class Item {
   }
   int add();  // index on the panel, -1 once N_ITEMS are taken
 
-  // In the panel's units. Never INT32_MIN, that's ITEM_UNKNOWN.
+  // In the panel's units. Never INT32_MIN, that's ITEM_UNKNOWN, and 0 for what isn't a number yet.
   int32_t scaled(float v) const {
     float x = roundf(v * powf(10, dec_));
-    return x >= 2147483648.0f ? INT32_MAX : x <= -2147483648.0f ? -INT32_MAX : (int32_t) x;
+    return std::isnan(x) ? 0 : x >= 2147483648.0f ? INT32_MAX : x <= -2147483648.0f ? -INT32_MAX : (int32_t) x;
   }
   // What goes again in the panel's new language. An ITEM_TEXT's value is a text too.
   uint8_t text_needs() const {

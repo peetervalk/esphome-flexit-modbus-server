@@ -1,9 +1,10 @@
 #include "update.h"
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include "esp_ota_ops.h"
-#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -12,7 +13,6 @@
 
 namespace flexit::panel::update {
 
-using esphome::App;
 using esphome::millis;
 using esphome::RAMAllocator;
 
@@ -142,11 +142,22 @@ int32_t name_version(const uint8_t *s, size_t n) {
   char name[0xF0];
   memcpy(name, s + 2, s[1]);
   name[s[1]] = 0;
-  unsigned maj, min, patch;
-  char more;
-  if (sscanf(name, "ci600 %3u.%3u.%3u%c", &maj, &min, &patch, &more) != 3 || maj > 255 || min > 255 || patch > 255)
+  // "ci600 2.0.10": three numbers of at most 255, nothing after them
+  if (strncmp(name, "ci600 ", 6))
     return -1;
-  return (int32_t) (maj << 16 | min << 8 | patch);
+  const char *p = name + 6;
+  uint32_t v = 0;
+  for (int i = 0; i < 3; i++) {
+    if ((i && *p++ != '.') || !isdigit((unsigned char) *p))
+      return -1;
+    unsigned n = 0;
+    for (int k = 0; k < 3 && isdigit((unsigned char) *p); k++)
+      n = n * 10 + (unsigned) (*p++ - '0');
+    if (n > 255)
+      return -1;
+    v = v << 8 | n;
+  }
+  return *p ? -1 : (int32_t) v;
 }
 
 std::string version_text(uint32_t v) {
@@ -238,120 +249,145 @@ void begin() {
   status("Saving the panel's settings...");
 }
 
-bool can_start() {
-  if (running()) {
-    status("Already flashing");
-    return false;
-  }
-  return (staging = spare_slot()) != nullptr;
-}
-
 static constexpr size_t BLK = 4096;  // one erase block at a time, esp_partition_write needs it erased first
 
-static void stage(const Download &r, uint8_t *buf) {
-  const esp_partition_t *part = staging;
-  size_t total = r.content_length;
-  auto fits = [part](size_t len) {
-    if (len <= part->size)
-      return true;
-    status("Download failed, the file's too big");
+// The download as it goes, the task's until stage_end()
+static struct {
+  uint8_t *buf;             // BLK
+  size_t fill, off, total;  // bytes in buf, in the slot, and the answer's length
+  uint32_t t0;
+  std::string why;       // it stopped early, with this status
+  std::atomic<int> pct;  // in the slot, -1 while the server doesn't say how much
+} D;
+
+// Internal RAM first, flash is written from PSRAM 32 bytes at a time
+static RAMAllocator<uint8_t> block_ram() { return RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL); }
+
+bool stage_begin() {
+  if (running() || downloading) {
+    status(downloading ? "Already downloading" : "Already flashing");
     return false;
-  };
+  }
+  if (!(staging = spare_slot()))
+    return false;
+  if (!(D.buf = block_ram().allocate(BLK))) {
+    status("Download failed, the ESP is out of RAM");
+    return false;
+  }
+  D.fill = D.off = D.total = 0;
+  D.t0 = millis();
+  D.why.clear();
+  D.pct = -1;
   staged_len = 0;
-  if (r.status_code != 200) {
-    status("Download failed (HTTP " + std::to_string(r.status_code) + ")");
-    return;
-  }
-  if (!fits(total))
-    return;
-  status("Downloading...");
-  size_t fill = 0, off = 0;
-  uint32_t t0 = millis(), heard = t0;
-  bool end = false;
   last_pct = -1;
-  while (!end && millis() - t0 < DOWNLOAD_TIMEOUT_MS) {
-    int n = r.read(buf + fill, total ? std::min(BLK - fill, total - off - fill) : BLK - fill);
-    App.feed_wdt();
-    if (n == READ_AGAIN && millis() - heard < STALL_MS)
-      continue;  // a slow server, give it until STALL_MS
-    if (n < 0 || (n == 0 && !r.read_complete()))
-      break;  // gone, or closed early
-    if (n > 0) {
-      heard = millis();
-      if (!off && !fill && buf[0] != 0x0a) {  // a firmware stream starts with protobuf field 1
-        end = true;                           // so it's none, like an empty one
-        break;
-      }
-      fill += n;
-    }
-    end = n == 0 || off + fill == total;
-    if (fill < BLK && !(end && fill))
-      continue;
-    size_t wlen = (fill + 15) & ~(size_t) 15;  // pad the tail to 16, encrypted flash writes 16-byte blocks
-    if (!fits(off + wlen))
-      return;
-    std::fill(buf + fill, buf + wlen, 0xFF);
-    if ((off % part->erase_size == 0 && esp_partition_erase_range(part, off, part->erase_size) != ESP_OK) ||
-        esp_partition_write(part, off, buf, wlen) != ESP_OK) {
-      status("Couldn't save the download on the ESP");
-      return;
-    }
-    off += fill;
-    fill = 0;
-    if (total)
-      progress((int) (100ull * off / total));
+  downloading = true;
+  status("Downloading...");
+  return true;
+}
+
+// buf into the slot, the tail padded to 16, since encrypted flash writes 16-byte blocks
+static bool write_block() {
+  size_t len = (D.fill + 15) & ~(size_t) 15;
+  if (D.off + len > staging->size) {
+    D.why = "Download failed, the file's too big";
+    return false;
   }
-  if (!end) {
-    std::string of = total ? " of " + std::to_string(total) : "";
-    status(millis() - t0 >= DOWNLOAD_TIMEOUT_MS
-               ? "The download timed out"
-               : "The download stopped at " + std::to_string(off + fill) + of + " bytes");
-    return;
+  std::fill(D.buf + D.fill, D.buf + len, 0xFF);
+  if ((D.off % staging->erase_size == 0 && esp_partition_erase_range(staging, D.off, staging->erase_size) != ESP_OK) ||
+      esp_partition_write(staging, D.off, D.buf, len) != ESP_OK) {
+    D.why = "Couldn't save the download on the ESP";
+    return false;
   }
-  if (!off) {
+  D.off += D.fill;
+  D.fill = 0;
+  if (D.total)
+    D.pct = (int) (100ull * D.off / D.total);
+  return true;
+}
+
+bool stage_feed(const uint8_t *p, size_t n, size_t total) {
+  if (!D.off && !D.fill) {
+    D.total = total;
+    if (total > staging->size) {
+      D.why = "Download failed, the file's too big";
+      return false;
+    }
+    if (p[0] != 0x0a)  // a firmware stream starts with protobuf field 1
+      return false;
+  }
+  if (millis() - D.t0 >= DOWNLOAD_TIMEOUT_MS) {
+    D.why = "The download timed out";
+    return false;
+  }
+  while (n) {
+    size_t k = std::min(n, BLK - D.fill);
+    memcpy(D.buf + D.fill, p, k);
+    D.fill += k;
+    p += k;
+    n -= k;
+    if (D.fill == BLK && !write_block())
+      return false;
+  }
+  return true;
+}
+
+void stage_end(int code, bool no_ram) {
+  downloading = false;
+  size_t got = D.off + D.fill;
+  bool ok = false;
+  if (no_ram)
+    status("Download failed, the ESP is out of RAM");
+  else if (!code && !got)
+    status("Couldn't connect to download it");
+  else if (!code)
+    status("The download stopped at " + std::to_string(got) + (D.total ? " of " + std::to_string(D.total) : "") +
+           " bytes");
+  else if (code != 200)
+    status("Download failed (HTTP " + std::to_string(code) + ")");
+  else if (!D.why.empty())
+    status(D.why);
+  else if (!got)
     status("That's not a panel firmware file");
+  else if (D.fill && !write_block())
+    status(D.why);
+  else
+    ok = true;
+  block_ram().deallocate(D.buf, BLK);
+  D.buf = nullptr;
+  if (!ok)
     return;
-  }
-  staged_len = off;
+  staged_len = D.off;
   ESP_LOGI(TAG, "Staged %u bytes", (unsigned) staged_len);
   begin();
 }
 
-void stage(const Download &d) {
-  RAMAllocator<uint8_t> ram;
-  uint8_t *buf = ram.allocate(BLK);
-  if (!buf) {
-    staged_len = 0;
-    status("Download failed, the ESP is out of RAM");
-    return;
-  }
-  stage(d, buf);
-  ram.deallocate(buf, BLK);
+std::string release_list(const std::string &url, std::string *file) {
+  static const std::string GITHUB = "https://github.com/", LATEST = "/releases/latest/download/";
+  size_t at = url.find(LATEST);
+  if (url.compare(0, GITHUB.size(), GITHUB) || at == std::string::npos)
+    return "";
+  std::string repo = url.substr(GITHUB.size(), at - GITHUB.size());  // OWNER/REPO
+  *file = url.substr(at + LATEST.size());
+  if (std::count(repo.begin(), repo.end(), '/') != 1 || file->empty() || file->find('/') != std::string::npos)
+    return "";
+  return "https://api.github.com/repos/" + repo + "/releases?per_page=5";
 }
 
-void check_head(const Download &d) {
-  uint8_t head[HEAD_LEN];
-  size_t got = 0;
-  uint32_t heard = millis();
-  while ((d.status_code == 200 || d.status_code == 206) && got < sizeof head) {
-    int n = d.read(head + got, sizeof head - got);
-    App.feed_wdt();
-    if (n == READ_AGAIN && millis() - heard < STALL_MS)
-      continue;
-    if (n <= 0)
-      break;
-    heard = millis();
-    got += n;
-  }
-  int32_t v = name_version(head, got);
-  if (v < 0) {
-    ESP_LOGW(TAG, "No panel firmware version at the URL (HTTP %d)", d.status_code);
-    return;
-  }
+void Newest::value(int, const char *key, int, const char *v) {
+  size_t n = strlen(v), f = file.size();
+  if (url.empty() && !strcmp(key, "browser_download_url") && n > f && v[n - f - 1] == '/' && file == v + n - f)
+    url = v;
+}
+
+bool check_head(const uint8_t *head, size_t n) {
+  int32_t v = name_version(head, n);
+  if (v < 0)
+    return false;
   ESP_LOGI(TAG, "The firmware at the URL is %s", version_text(v).c_str());
   latest_version = v;
   if (on_change)
     on_change();
+  return true;
 }
 
 // Ends the flash, gives the bus back
@@ -532,7 +568,7 @@ static void probe_wait(Reply got, bool timed_out) {
     F.probe_heard[F.probe_i] = true;
   } else if (!timed_out) {
     return;
-  } else if (++F.probe_tries < 2) {
+  } else if (++F.probe_tries < PROBE_TRIES) {
     enter_phase(PROBE);
     return;
   }
@@ -558,13 +594,13 @@ static void wait_bl(Reply got, uint32_t now) {
     } else if (F.bl_state == ST_IDLE) {
       enter_phase(ARM);
       status("Bootloader's ready...");
-    } else if (F.clean_tries < 4) {
+    } else if (F.clean_tries < CLEAN_TRIES) {
       enter_phase(CLEAN);  // busy and missed the reset, send it again
     } else {
       finish(false, "The panel's bootloader is stuck");
     }
   } else if (now - F.step_ms > ENTER_TIMEOUT_MS) {
-    if (++F.enter_tries > 2) {
+    if (++F.enter_tries >= ENTER_TRIES) {
       finish(false, "The panel didn't go into its bootloader");
       return;
     }
@@ -634,15 +670,15 @@ static void end_wait(Reply got, uint32_t now) {
     finish(false, "The panel didn't finish the update");
 }
 
-// Done once the loader says it's starting or goes quiet. Else reset again after 2 s and 4 s, and give up 5 s after
-// the third.
+// Done once the loader says it's starting or goes quiet. Else reset again 2 s, 4 s and then 5 s apart, and give up
+// 5 s after the last.
 static void reset_wait(Reply got, uint32_t now) {
   if (got == R_STATUS)
     F.answer_ms = now;
   if ((got == R_STATUS && F.bl_state == ST_BOOT) || now - F.answer_ms > RESTARTED_MS) {
     finish(true);
   } else if (now - F.step_ms >= std::min(RESET_AGAIN_MS << F.reset_tries, RESET_AGAIN_MAX_MS)) {
-    if (++F.reset_tries >= 3)  // the firmware's in already
+    if (++F.reset_tries >= RESET_TRIES)  // the firmware's in already
       finish(true, "The new firmware is in, but the panel didn't restart. Power it off and on");
     else
       enter_phase(RESET);
@@ -687,6 +723,27 @@ static void react(Reply got, bool timed_out, uint32_t now) {
     default:
       break;
   }
+}
+
+// The phases that send one short request, a probe, the kick, an arm, an end or a reset
+static bool one_shot(Phase p) {
+  return p == PROBE || p == ENTER || p == CLEAN || p == ARM || p == END || p == RESET || p == ABORT;
+}
+
+// Whether the bus is clear for the phase's request. A short one goes in the CX60's quiet time after its status
+// broadcast, so its next poll can't run into it or the answer, and after WINDOW_WAIT_MS without one it takes any
+// quiet, for a bus where that never comes. Pieces don't fit in it and status polls come too often, so they only
+// wait for a quiet bus.
+static bool clear_to_send(uint32_t now) {
+  uint32_t quiet = hooks->quiet_min_us();
+  if (!one_shot(F.phase))
+    return quiet >= BUS_QUIET_US;
+  if (!due(now))
+    return false;
+  uint32_t age = hooks->status_age_us();
+  if (age != UINT32_MAX && pbus_status_left(age, PBUS_END_US) >= ONE_SHOT_US && quiet >= PBUS_START_MIN_US)
+    return true;
+  return quiet >= BUS_QUIET_US && now - F.next_ms > WINDOW_WAIT_MS;
 }
 
 // The next request for the phase, if it's time
@@ -766,6 +823,8 @@ static void request(uint32_t now) {
 }
 
 void pump() {
+  if (downloading && D.pct >= 0)
+    progress(D.pct);
   if (!running())
     return;
   uint32_t now = millis();
@@ -787,7 +846,7 @@ void pump() {
   Reply got = F.reply;
   F.reply = R_NONE;
   react(got, timed_out, now);
-  if (running() && hooks->quiet_min_us() >= BUS_QUIET_US)
+  if (running() && clear_to_send(millis()))
     request(millis());
 }
 

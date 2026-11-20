@@ -28,6 +28,17 @@ inline constexpr uint32_t JPEG_RAM = POOL + PIC_MAX_W * 8 * 3, MAKE_RAM = POOL +
 static_assert(Transfer::CHUNK <= Zip::MAX, "a chunk of pieces fits Zip's buffer");
 
 enum Encoding { AUTO, PALETTE, JPEG };
+inline constexpr const char *ENCODINGS[] = {"auto", "palette", "jpeg"};
+
+// encoding and quality as written in picture.yaml
+inline Encoding encoding_of(const std::string &s) {
+  int i = find(ENCODINGS, s);
+  return i < 0 ? AUTO : (Encoding) i;
+}
+inline int quality_of(const std::string &s) {
+  int q = atoi(s.c_str());
+  return q < 1 ? 0 : std::min(q, 100);
+}
 
 // A picture as the packages register it
 struct Source {
@@ -35,6 +46,7 @@ struct Source {
   std::function<uint32_t(int, int)> pixel;   // 0xRRGGBB
   std::function<void()> done;                // optional, its pixels aren't needed now
   std::function<void()> picked;              // optional, it was picked to be shown
+  std::function<void(bool)> on_panel;        // optional: true once it's on the panel, false once another is wanted
   // Optional: what it has to do before size() can say yes, like met.h drawing its scene, a slice at a time until
   // deadline_us. True once there's nothing more to do now.
   std::function<bool(uint32_t deadline_us)> prepare;
@@ -44,22 +56,21 @@ struct Source {
   std::function<void(int y, uint8_t *idx)> row;
   std::function<Parts()> parts;  // optional, with row: its parts in front of the animations farther than them
   Encoding encoding = AUTO;
-  int quality = 0;  // highest JPEG quality 1..100, 0 = the best that fits
+  int quality = 0;                                           // highest JPEG quality 1..100, 0 = the best that fits
+  void coding(const std::string &e, const std::string &q) {  // as the package's vars have them
+    encoding = encoding_of(e);
+    quality = quality_of(q);
+  }
 };
 inline std::map<std::string, Source> sources;
 
 inline void add(const std::string &name, Source s) { sources[name] = std::move(s); }
-// encoding and quality as written in picture.yaml
-inline Encoding encoding_of(std::string s) {
-  for (auto &c : s)
-    c = (char) tolower((unsigned char) c);
-  return s == "palette" ? PALETTE : s == "jpeg" ? JPEG : AUTO;
-}
-inline int quality_of(const std::string &s) {
-  int q = atoi(s.c_str());
-  return q < 1 ? 0 : std::min(q, 100);
-}
 
+// An ESPHome image's size, 0 x 0 while it has none
+template<typename Img> void dims_of(Img *img, int &w, int &h) {
+  w = img->get_width();
+  h = img->get_height();
+}
 // An ESPHome image's pixels as 0xRRGGBB
 template<typename Img> std::function<uint32_t(int, int)> pixels_of(Img *img) {
   return [img](int x, int y) -> uint32_t {
@@ -73,13 +84,11 @@ template<typename Img> void add_image(const std::string &name, Img &&image, cons
   auto *img = ptr_of(image);
   Source s;
   s.size = [img](int &w, int &h) {
-    w = img->get_width();
-    h = img->get_height();
+    dims_of(img, w, h);
     return true;
   };
   s.pixel = pixels_of(img);
-  s.encoding = encoding_of(encoding);
-  s.quality = quality_of(quality);
+  s.coding(encoding, quality);
   add(name, s);
 }
 
@@ -120,13 +129,22 @@ inline State S;
 
 inline void status(const std::string &s) { status(id(panel_picture_status), s); }
 
+// The one wanted until now isn't
+inline void left(const std::string &name) {
+  auto it = sources.find(S.want);
+  if (it != sources.end() && S.want != name && it->second.on_panel)
+    it->second.on_panel(false);
+}
+
 // The Panel Picture select's set_action. An online picture is downloaded again. "None" or "" is none.
 inline void picked(const std::string &name) {
   if (name.empty() || name == "None") {
+    left("");
     S.want.clear();
     S.redo = true;
     S.to_clear = true;  // K_PIC_CLEAR also stops an animation on its way, so loop() waits for that
     S.shown = Pic();    // so a show() before the next loop sends all of it
+    S.t.head = false;   // and what the panel answers a piece on its way isn't for anything
     return;
   }
   auto it = sources.find(name);
@@ -137,6 +155,7 @@ inline void picked(const std::string &name) {
   }
   if (it->second.picked)
     it->second.picked();
+  left(name);
   S.want = name;
   S.redo = true;
 }
@@ -369,10 +388,7 @@ inline void map(uint32_t deadline_us) {
       S.src->row(S.y, idx);
     for (int x = 0; x < w && !mine; x++) {
       uint32_t c = px(x, S.y), r = c >> 16, g = c >> 8 & 255, b = c & 255;
-      uint8_t &i = S.lut[bin(c)];
-      if (i == 0xFF)
-        i = (uint8_t) nearest(bin_rgb(bin(c)), S.made.pal, 16);
-      idx[x] = i;
+      uint8_t i = idx[x] = lut_index(S.lut.data(), c, S.made.pal, 16);
       uint32_t *s = S.sums.sum[i];
       s[0] += r;
       s[1] += g;
@@ -525,6 +541,8 @@ inline void now_shown() {
   S.phase = IDLE;
   S.t.tries = 0;
   status("Shown: " + S.name + what(S.shown));
+  if (S.src->on_panel && S.name == S.want)
+    S.src->on_panel(true);
 }
 
 // The parts of made that differ from has, the panel's. After a BEGIN it has none.
@@ -706,10 +724,6 @@ inline void loop(uint32_t deadline_us) {
     case JPEG_TRY:
       jpeg(deadline_us);
       break;
-    case CHOOSE:
-      if (!choose())
-        break;
-      [[fallthrough]];
     case PLAN:
       if (!plan())
         break;
@@ -718,6 +732,8 @@ inline void loop(uint32_t deadline_us) {
       send(deadline_us);
       break;
   }
+  if (S.phase == CHOOSE)  // at once, so the source's RAM is free before the animations look for theirs
+    choose();
 }
 
 }  // namespace flexit::panel::picture

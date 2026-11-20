@@ -8,6 +8,7 @@ static int channel(int bin, int c) { return bin >> (8 - 4 * c) & 15; }
 
 void Cut::start(const std::vector<uint32_t> &hist, int n) {
   bins.clear();
+  bins.reserve(occurring(hist));  // so it never grows
   for (int i = 0; i < BINS; i++)
     if (hist[i])
       bins.push_back((uint16_t) i);
