@@ -10,9 +10,10 @@ esp32:
       CONFIG_UART_ISR_IN_IRAM: "y"
 
 # ERROR, so every other log compiles out and catches one left as the only statement of an if. The other tests
-# build with them all.
+# build with them all. ESPHome 2026.11 wants the boot log level at least as severe (its default is WARN).
 logger:
   level: ERROR
+  boot_log_level: ERROR
 
 substitutions:
   flexit_tx_pin: D4

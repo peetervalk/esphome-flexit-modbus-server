@@ -12,12 +12,13 @@ this page says otherwise.
 
 ## Summary
 
-Status as of 2026-11-20, with upstream `main` merged at `f59ccfa` (PR #65).
+Status as of 2026-11-25, with upstream `main` merged at `9977794` (PR #66).
 
 | Change | Files | Proposed upstream? |
 |---|---|---|
 | [Echoed exception responses are not answered](#echoed-exception-responses-are-not-answered) | component, `tests/server_test.cpp` | Not yet |
 | [The packages load the component from this fork](#the-packages-load-the-component-from-this-fork) | `packages/core.yaml`, `packages/panel/screen_camera.yaml` | No, it names this fork |
+| [The esp32-c3 CI build passes on ESPHome 2026.11](#the-esp32-c3-ci-build-passes-on-esphome-202611) | `tests/esp32-c3.yaml` | Not yet |
 
 Nothing else in `packages/`, `example.yaml` or the README is changed.
 [`flexit-modbus.yaml`](flexit-modbus.yaml) is the configuration of the
@@ -75,6 +76,15 @@ screen camera fails: "couldn't find remote ref live". The CI builds `esp32` and
 
 The component's branch comes from `flexit_ref` alone, so the packages' `ref:`
 should be `${flexit_ref}` too, as below.
+
+## The esp32-c3 CI build passes on ESPHome 2026.11
+
+The CI installs the latest ESPHome. Since 2026.11.0 the logger checks
+`boot_log_level`, which defaults to WARN, against `level`, and refuses a boot
+level less severe than the global one. `tests/esp32-c3.yaml` sets
+`level: ERROR`, so its build failed config validation, upstream's too. Here it
+also sets `boot_log_level: ERROR`. Only that test is affected, not the
+installation's configuration. Drop this line when upstream fixes it.
 
 ## Using this branch
 
